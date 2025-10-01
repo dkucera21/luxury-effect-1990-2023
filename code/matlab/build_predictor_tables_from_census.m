@@ -1,287 +1,460 @@
-%% build_predictor_tables_from_census.m
-% Builds predictor tables from CENSUS_TABLES_new (in base workspace)
-% Filters cities STRICTLY: a city is included only if *every* city-year
-% present for that city has >= minTracts tracts with coverage >= threshold.
-% Also excludes specified non-CONUS cities.
+%% build_predictor_tables_from_census_PLUS_LUX.m
+% Uses ONLY columns that exist in the harmonized tables:
+% PCT_OVERLAP, CENSUS_TRACT_AREA,
+% HOUSING_DENSITY, POP_DENSITY, PERCENT_OCCUPIED_HOUSING, PERCENT_OWNED_HOUSING,
+% PERCENT_HISPANIC, PERCENT_WHITE, PERCENT_BLACK, PERCENT_ASIAN,
+% PERCENT_BACHELOR, PERCENT_GRADUATE, PERCENT_HS,
+% RAW_INCOME_CPI, MEAN_NDVI, MEAN_LST, MEDIAN_NDVI, MEDIAN_LST.
 
-%% Pull inputs from base workspace
-try
-    CENSUS_TABLES_new = evalin('base','CENSUS_TABLES_new');
-catch
-    error('CENSUS_TABLES_new not found in base workspace. Load it first, then run this script.');
-end
+%% -------------------------- Requirements --------------------------
+assert(exist('CENSUS_TABLES_rebuilt','var')==1 && isstruct(CENSUS_TABLES_rebuilt), ...
+    'CENSUS_TABLES_rebuilt (struct) must be in the workspace.');
+assert(exist('CityListMaster','var')==1, ...
+    'CityListMaster must be in the workspace.');
 
-% If these predictor tables already exist in base, pull them; otherwise create placeholders
-A_HYPO_MEANS            = fetchOrEmpty('A_HYPO_MEANS');
-A_HYPO_MEDIANS          = fetchOrEmpty('A_HYPO_MEDIANS');
-A_HYPO_MEANS_TEMPORAL   = fetchOrEmpty('A_HYPO_MEANS_TEMPORAL');
-A_HYPO_MEDIANS_TEMPORAL = fetchOrEmpty('A_HYPO_MEDIANS_TEMPORAL');
+CityListMaster = unique(string(strtrim(CityListMaster(:))));
+nCities = numel(CityListMaster);
+fprintf('\n[START] Building predictor tables for %d cities ...\n', nCities);
 
-%% ---- configuration ----
-threshold   = 50;    % % overlap cutoff (0–100) per tract
-minTracts   = 5;     % minimum valid tracts per city-year (by coverage only)
-pctNames    = {'PCT_OVERLAP','PercentAreaNDVI','PCT_COVER','PCT_COV'}; % coverage candidates
-excludeList = string({'Anchorage','Fairbanks','HiloHI','Honolulu','Ponce','SanJuan'});
+%% -------------------------- Config --------------------------
+CoverageThreshold = 50;  % PCT_OVERLAP cutoff (0–100)
+MinTractsPerCY    = 5;
+YearPattern       = '^T_(\d{4})n?_(.+)$';
 
-commonVars = { ...
-  'POP_DENSITY','HOUSING_DENSITY','PERCENT_UNDER_5', ...
-  'PERCENT_OCCUPIED_HOUSING','PERCENT_OWNED_HOUSING', ...
-  'PERCENT_HISPANIC','PERCENT_WHITE','PERCENT_BLACK', ...
-  'PERCENT_NATIVE','PERCENT_ASIAN','PERCENT_BACHELOR', ...
-  'PERCENT_GRADUATE','PERCENT_HS','incZ'};
+% Hard-locked variable list (present in harmonized) — NO Shape_* fields
+ALLVARS = ["PCT_OVERLAP","CENSUS_TRACT_AREA", ...
+           "HOUSING_DENSITY","POP_DENSITY","PERCENT_OCCUPIED_HOUSING","PERCENT_OWNED_HOUSING", ...
+           "PERCENT_HISPANIC","PERCENT_WHITE","PERCENT_BLACK","PERCENT_ASIAN", ...
+           "PERCENT_BACHELOR","PERCENT_GRADUATE","PERCENT_HS","RAW_INCOME",...
+           "RAW_INCOME_CPI","MEAN_NDVI","MEAN_LST","MEDIAN_NDVI","MEDIAN_LST"];
 
-meanOnlyVars   = {'MEAN_NDVI','MEAN_LST'};
-medianOnlyVars = {'MEDIAN_NDVI','MEDIAN_LST'};
+NUMVARS_TO_AGG = setdiff(ALLVARS, "PCT_OVERLAP");   % aggregate everything except coverage
 
-varsForMeansTemporal   = [commonVars, meanOnlyVars];
-varsForMediansTemporal = [commonVars, medianOnlyVars];
+%% -------------------------- Build (City,Year) shell --------------------------
+fns = string(fieldnames(CENSUS_TABLES_rebuilt));
+tok = regexp(fns, YearPattern, 'tokens', 'once');
+has = ~cellfun(@isempty, tok);
+YearsAll  = cellfun(@(t) str2double(t{1}), tok(has));
+CitiesAll = string(cellfun(@(t) t{2}, tok(has), 'UniformOutput', false));
+keep = ismember(CitiesAll, CityListMaster);
+CY   = table(CitiesAll(keep), YearsAll(keep), 'VariableNames', {'City','Year'});
+CY   = unique(sortrows(CY, {'City','Year'}), 'rows');
+CY.City = string(CY.City); CY.Year = double(CY.Year);
 
-%% ---- pass 0: determine strict inclusion per city (every year must pass) ----
-tblNames = fieldnames(CENSUS_TABLES_new);
-passRows = []; % struct array: City, Year, Pass (logical)
+%% -------------------------- Ensure shells exist --------------------------
+A_HYPO_MEANS            = pf_ensure_city_shell('A_HYPO_MEANS',           CityListMaster);
+A_HYPO_MEDIANS          = pf_ensure_city_shell('A_HYPO_MEDIANS',         CityListMaster);
+A_HYPO_MEANS_TEMPORAL   = pf_ensure_temporal_shell('A_HYPO_MEANS_TEMPORAL',   CY);
+A_HYPO_MEDIANS_TEMPORAL = pf_ensure_temporal_shell('A_HYPO_MEDIANS_TEMPORAL', CY);
 
-for i = 1:numel(tblNames)
-    tname = tblNames{i};
-    tok = regexp(tname, '^T_(\d{4})n?_(.+)$', 'tokens', 'once');
-    if isempty(tok), continue; end
-    yr   = str2double(tok{1});
-    city = string(tok{2});
+%% -------------------------- Aggregate per city-year --------------------------
+rowsMEAN = []; rowsMEDN = [];
 
-    T = CENSUS_TABLES_new.(tname);
+for i = 1:numel(fns)
+    tname = fns(i);
+    tk = regexp(tname, YearPattern, 'tokens', 'once');
+    if isempty(tk), continue; end
+    yr   = str2double(tk{1});
+    city = string(tk{2});
+    if ~ismember(city, CityListMaster), continue; end
+
+    T = CENSUS_TABLES_rebuilt.(tname);
     if ~istable(T) || height(T)==0, continue; end
 
-    pctColName = findFirstVar(T.Properties.VariableNames, pctNames);
-    if isempty(pctColName)
-        pass = false; % no coverage column → treat as failing this year
-    else
-        pct = getNumCol(T, pctColName);
-        pass = nnz(pct >= threshold & isfinite(pct)) >= minTracts;
+    % Coverage (only column that exists)
+    if ~ismember("PCT_OVERLAP", string(T.Properties.VariableNames)), continue; end
+    cov = double(T.PCT_OVERLAP);
+
+    recMean = struct('City',city,'Year',yr);
+    recMed  = struct('City',city,'Year',yr);
+    for vn = NUMVARS_TO_AGG(:).'
+        vchar = char(vn);
+        if ismember(vn, string(T.Properties.VariableNames))
+            val = double(T.(vchar));
+            val(val == -222222222) = NaN;
+            ok = isfinite(cov) & cov >= CoverageThreshold & isfinite(val);
+            if nnz(ok) >= MinTractsPerCY
+                recMean.(vchar) = mean(val(ok), 'omitnan');
+                recMed.(vchar)  = median(val(ok), 'omitnan');
+            else
+                recMean.(vchar) = NaN; recMed.(vchar) = NaN;
+            end
+        else
+            recMean.(vchar) = NaN; recMed.(vchar) = NaN;
+        end
     end
-    passRows = [passRows; struct('City',city,'Year',yr,'Pass',logical(pass))]; %#ok<AGROW>
+
+    rowsMEAN = [rowsMEAN; recMean]; %#ok<AGROW>
+    rowsMEDN = [rowsMEDN; recMed];  %#ok<AGROW>
 end
 
-if isempty(passRows)
-    error('Could not parse any city-year tables from CENSUS_TABLES_new (expected names like T_YYYY_CITY).');
+MEAN_T = pf_struct2temporal(rowsMEAN);
+MEDN_T = pf_struct2temporal(rowsMEDN);
+
+% Keep exact city set
+if ~isempty(MEAN_T), MEAN_T = MEAN_T(ismember(MEAN_T.City, CityListMaster), :); end
+if ~isempty(MEDN_T), MEDN_T = MEDN_T(ismember(MEDN_T.City, CityListMaster), :); end
+
+%% -------- incZ_among_cities (cross-city Z of RAW_INCOME_CPI per year) --------
+MEAN_T.incZ_among_cities = NaN(height(MEAN_T),1);
+MEDN_T.incZ_among_cities = NaN(height(MEDN_T),1);
+
+if ismember('RAW_INCOME_CPI', string(MEAN_T.Properties.VariableNames))
+    for yy = unique(MEAN_T.Year).'
+        m = MEAN_T.Year==yy & isfinite(MEAN_T.RAW_INCOME_CPI);
+        mu = mean(MEAN_T.RAW_INCOME_CPI(m),'omitnan');
+        sd = std( MEAN_T.RAW_INCOME_CPI(m),'omitnan');
+        if isfinite(sd) && sd>0
+            MEAN_T.incZ_among_cities(m) = (MEAN_T.RAW_INCOME_CPI(m) - mu) ./ sd;
+        end
+    end
+end
+if ismember('RAW_INCOME_CPI', string(MEDN_T.Properties.VariableNames))
+    for yy = unique(MEDN_T.Year).'
+        m = MEDN_T.Year==yy & isfinite(MEDN_T.RAW_INCOME_CPI);
+        mu = mean(MEDN_T.RAW_INCOME_CPI(m),'omitnan');
+        sd = std( MEDN_T.RAW_INCOME_CPI(m),'omitnan');
+        if isfinite(sd) && sd>0
+            MEDN_T.incZ_among_cities(m) = (MEDN_T.RAW_INCOME_CPI(m) - mu) ./ sd;
+        end
+    end
 end
 
-PassTab = struct2table(passRows);
-% Strict rule: include city only if ALL its years present pass
-G   = findgroups(PassTab.City);
-ok  = splitapply(@all, PassTab.Pass, G);
-CU  = splitapply(@(c) c(1), PassTab.City, G);
-includeCities = CU(ok);
+%% -------------------------- Luxury-effect slopes --------------------------
+% slope of outcome ~ (RAW_INCOME_CPI / 10,000) within city-year
+rowsLuxMean = []; rowsLuxMed  = [];
+for i = 1:numel(fns)
+    tname = fns(i);
+    tk = regexp(tname, YearPattern, 'tokens', 'once');
+    if isempty(tk), continue; end
+    yr   = str2double(tk{1});
+    city = string(tk{2});
+    if ~ismember(city, CityListMaster), continue; end
 
-% Remove excluded cities explicitly
-includeCities = setdiff(includeCities, excludeList);
-
-% If nothing passes, fail fast
-if isempty(includeCities)
-    error('No cities meet the strict coverage rule across all city-years (after exclusions).');
-end
-
-%% ---- pass 1: per-city-year summaries (we still compute, then filter to includeCities) ----
-rowsMean   = []; % struct array for temporal means
-rowsMedian = []; % struct array for temporal medians
-
-for i = 1:numel(tblNames)
-    tname = tblNames{i};
-    tok = regexp(tname, '^T_(\d{4})n?_(.+)$', 'tokens', 'once');
-    if isempty(tok), continue; end
-    yr   = str2double(tok{1});
-    city = string(tok{2});
-
-    T = CENSUS_TABLES_new.(tname);
+    T = CENSUS_TABLES_rebuilt.(tname);
     if ~istable(T) || height(T)==0, continue; end
+    V = string(T.Properties.VariableNames);
 
-    pctColName = findFirstVar(T.Properties.VariableNames, pctNames);
-    if isempty(pctColName), continue; end
-    pct = getNumCol(T, pctColName);
+    if ~all(ismember(["PCT_OVERLAP","RAW_INCOME_CPI"], V)), continue; end
+    cov = double(T.PCT_OVERLAP);
+    inc = double(T.RAW_INCOME_CPI);
+    inc(~isfinite(inc)) = NaN;
+    x10k = inc ./ 10000;
 
-    % --- MEAN set (per-city-year) ---
-    recM = struct('City', city, 'Year', yr);
-    for v = 1:numel(varsForMeansTemporal)
-        vn  = varsForMeansTemporal{v};
-        col = getNumCol(T, vn);
-        if isempty(col)
-            recM.(vn) = NaN; continue;
+    s_mean_ndvi_10k = pf_slope_if_ok(x10k, pf_numcol(T,V,'MEAN_NDVI'),   cov, CoverageThreshold, MinTractsPerCY);
+    s_mean_lst_10k  = pf_slope_if_ok(x10k, pf_numcol(T,V,'MEAN_LST'),    cov, CoverageThreshold, MinTractsPerCY);
+    s_med_ndvi_10k  = pf_slope_if_ok(x10k, pf_numcol(T,V,'MEDIAN_NDVI'), cov, CoverageThreshold, MinTractsPerCY);
+    s_med_lst_10k   = pf_slope_if_ok(x10k, pf_numcol(T,V,'MEDIAN_LST'),  cov, CoverageThreshold, MinTractsPerCY);
+
+    rowsLuxMean = [rowsLuxMean; struct('City',city,'Year',yr, ...
+        'LUX_NDVI_per10k', s_mean_ndvi_10k, 'LUX_LST_per10k',  s_mean_lst_10k)]; %#ok<AGROW>
+    rowsLuxMed  = [rowsLuxMed;  struct('City',city,'Year',yr, ...
+        'LUX_NDVI_per10k', s_med_ndvi_10k,  'LUX_LST_per10k',  s_med_lst_10k)];  %#ok<AGROW>
+end
+LUX_MEAN_T = pf_struct2temporal(rowsLuxMean);
+LUX_MEDN_T = pf_struct2temporal(rowsLuxMed);
+
+%% -------------------------- Vegetative cooling slopes ----------------------
+% slope of LST on NDVI
+rowsVCMean = []; rowsVCMed  = [];
+for i = 1:numel(fns)
+    tname = fns(i);
+    tk = regexp(tname, YearPattern, 'tokens', 'once');
+    if isempty(tk), continue; end
+    yr   = str2double(tk{1});
+    city = string(tk{2});
+    if ~ismember(city, CityListMaster), continue; end
+
+    T = CENSUS_TABLES_rebuilt.(tname);
+    if ~istable(T) || height(T)==0, continue; end
+    V = string(T.Properties.VariableNames);
+    if ~ismember("PCT_OVERLAP", V), continue; end
+
+    cov    = double(T.PCT_OVERLAP);
+    ndmean = pf_numcol(T,V,'MEAN_NDVI');
+    lsmean = pf_numcol(T,V,'MEAN_LST');
+    ndmed  = pf_numcol(T,V,'MEDIAN_NDVI');
+    lsmed  = pf_numcol(T,V,'MEDIAN_LST');
+
+    b_mean = pf_pair_slope_if_ok(ndmean, lsmean, cov, CoverageThreshold, MinTractsPerCY);
+    b_med  = pf_pair_slope_if_ok(ndmed,  lsmed,  cov, CoverageThreshold, MinTractsPerCY);
+
+    rowsVCMean = [rowsVCMean; struct('City',city,'Year',yr,'VEGCOOL_MEAN_LST_perNDVI',   b_mean)]; %#ok<AGROW>
+    rowsVCMed  = [rowsVCMed;  struct('City',city,'Year',yr,'VEGCOOL_MEDIAN_LST_perNDVI', b_med)];  %#ok<AGROW>
+end
+VC_MEAN_T = pf_struct2temporal(rowsVCMean);
+VC_MEDN_T = pf_struct2temporal(rowsVCMed);
+
+%% -------------------------- Merge temporal tables --------------------------
+drop_MEAN_names = setdiff(string(MEAN_T.Properties.VariableNames),   ["City","Year"]);
+drop_MEDN_names = setdiff(string(MEDN_T.Properties.VariableNames),   ["City","Year"]);
+
+A_HYPO_MEANS_TEMPORAL   = pf_dropIfExists(A_HYPO_MEANS_TEMPORAL,   drop_MEAN_names);
+A_HYPO_MEDIANS_TEMPORAL = pf_dropIfExists(A_HYPO_MEDIANS_TEMPORAL, drop_MEDN_names);
+
+A_HYPO_MEANS_TEMPORAL   = outerjoin(A_HYPO_MEANS_TEMPORAL,   MEAN_T,     'Keys',{'City','Year'}, 'MergeKeys',true, 'Type','left');
+A_HYPO_MEDIANS_TEMPORAL = outerjoin(A_HYPO_MEDIANS_TEMPORAL, MEDN_T,     'Keys',{'City','Year'}, 'MergeKeys',true, 'Type','left');
+
+% add LUX
+A_HYPO_MEANS_TEMPORAL   = pf_dropIfExists(A_HYPO_MEANS_TEMPORAL,   setdiff(string(LUX_MEAN_T.Properties.VariableNames), ["City","Year"]));
+A_HYPO_MEDIANS_TEMPORAL = pf_dropIfExists(A_HYPO_MEDIANS_TEMPORAL, setdiff(string(LUX_MEDN_T.Properties.VariableNames), ["City","Year"]));
+A_HYPO_MEANS_TEMPORAL   = outerjoin(A_HYPO_MEANS_TEMPORAL,   LUX_MEAN_T, 'Keys',{'City','Year'}, 'MergeKeys',true, 'Type','left');
+A_HYPO_MEDIANS_TEMPORAL = outerjoin(A_HYPO_MEDIANS_TEMPORAL, LUX_MEDN_T, 'Keys',{'City','Year'}, 'MergeKeys',true, 'Type','left');
+
+% add VEGCOOL
+A_HYPO_MEANS_TEMPORAL   = pf_dropIfExists(A_HYPO_MEANS_TEMPORAL,   setdiff(string(VC_MEAN_T.Properties.VariableNames), ["City","Year"]));
+A_HYPO_MEDIANS_TEMPORAL = pf_dropIfExists(A_HYPO_MEDIANS_TEMPORAL, setdiff(string(VC_MEDN_T.Properties.VariableNames), ["City","Year"]));
+A_HYPO_MEANS_TEMPORAL   = outerjoin(A_HYPO_MEANS_TEMPORAL,   VC_MEAN_T, 'Keys',{'City','Year'}, 'MergeKeys',true, 'Type','left');
+A_HYPO_MEDIANS_TEMPORAL = outerjoin(A_HYPO_MEDIANS_TEMPORAL, VC_MEDN_T, 'Keys',{'City','Year'}, 'MergeKeys',true, 'Type','left');
+
+% Keep exact city set
+A_HYPO_MEANS_TEMPORAL   = A_HYPO_MEANS_TEMPORAL(  ismember(string(A_HYPO_MEANS_TEMPORAL.City),   CityListMaster), :);
+A_HYPO_MEDIANS_TEMPORAL = A_HYPO_MEDIANS_TEMPORAL(ismember(string(A_HYPO_MEDIANS_TEMPORAL.City), CityListMaster), :);
+
+% RAW_INCOME_CPI to end if present
+A_HYPO_MEANS_TEMPORAL   = pf_move_to_end(A_HYPO_MEANS_TEMPORAL,   "RAW_INCOME_CPI");
+A_HYPO_MEDIANS_TEMPORAL = pf_move_to_end(A_HYPO_MEDIANS_TEMPORAL, "RAW_INCOME_CPI");
+
+% Also move RAW_INCOME_CPI to end in MEAN_T/MEDN_T shells
+MEAN_T = pf_move_to_end(MEAN_T, "RAW_INCOME_CPI");
+MEDN_T = pf_move_to_end(MEDN_T, "RAW_INCOME_CPI");
+
+%% -------------------------- Collapse to non-temporal -----------------------
+vars_MEAN_all = setdiff(string(A_HYPO_MEANS_TEMPORAL.Properties.VariableNames),   ["City","Year"]);
+vars_MEDN_all = setdiff(string(A_HYPO_MEDIANS_TEMPORAL.Properties.VariableNames), ["City","Year"]);
+
+aggMEAN   = pf_collapseAcrossYears(A_HYPO_MEANS_TEMPORAL,   vars_MEAN_all, @mean);
+aggMEDIAN = pf_collapseAcrossYears(A_HYPO_MEDIANS_TEMPORAL, vars_MEDN_all, @median);
+
+% 2023 snapshot of incZ_among_cities (if present)
+if any(A_HYPO_MEANS_TEMPORAL.Year==2023) && ismember('incZ_among_cities', string(A_HYPO_MEANS_TEMPORAL.Properties.VariableNames))
+    Z23m = unique(A_HYPO_MEANS_TEMPORAL(A_HYPO_MEANS_TEMPORAL.Year==2023, {'City','incZ_among_cities'}), 'rows');
+    Z23m.Properties.VariableNames{'incZ_among_cities'} = 'incZ_among_cities_2023';
+    aggMEAN = outerjoin(aggMEAN, Z23m, 'Keys','City', 'MergeKeys',true, 'Type','left');
+end
+if any(A_HYPO_MEDIANS_TEMPORAL.Year==2023) && ismember('incZ_among_cities', string(A_HYPO_MEDIANS_TEMPORAL.Properties.VariableNames))
+    Z23d = unique(A_HYPO_MEDIANS_TEMPORAL(A_HYPO_MEDIANS_TEMPORAL.Year==2023, {'City','incZ_among_cities'}), 'rows');
+    Z23d.Properties.VariableNames{'incZ_among_cities'} = 'incZ_among_cities_2023';
+    aggMEDIAN = outerjoin(aggMEDIAN, Z23d, 'Keys','City', 'MergeKeys',true, 'Type','left');
+end
+
+% Collapse LUX and VEGCOOL by city
+luxVars = ["LUX_NDVI_per10k","LUX_LST_per10k"];
+luxMEAN_byCity = pf_collapseAcrossYears(A_HYPO_MEANS_TEMPORAL,   luxVars, @mean);
+luxMEDN_byCity = pf_collapseAcrossYears(A_HYPO_MEDIANS_TEMPORAL, luxVars, @median);
+
+vcMEAN_byCity  = pf_collapseAcrossYears(VC_MEAN_T, "VEGCOOL_MEAN_LST_perNDVI",   @mean);
+vcMEDN_byCity  = pf_collapseAcrossYears(VC_MEDN_T, "VEGCOOL_MEDIAN_LST_perNDVI", @median);
+
+% Merge into collapsed tables
+aggMEAN   = pf_dropIfExists(aggMEAN,   [luxVars, "VEGCOOL_MEAN_LST_perNDVI"]);
+aggMEDIAN = pf_dropIfExists(aggMEDIAN, [luxVars, "VEGCOOL_MEDIAN_LST_perNDVI"]);
+
+aggMEAN   = outerjoin(aggMEAN,   luxMEAN_byCity, 'Keys','City', 'MergeKeys',true, 'Type','left');
+aggMEAN   = outerjoin(aggMEAN,   vcMEAN_byCity,  'Keys','City', 'MergeKeys',true, 'Type','left');
+
+aggMEDIAN = outerjoin(aggMEDIAN, luxMEDN_byCity, 'Keys','City', 'MergeKeys',true, 'Type','left');
+aggMEDIAN = outerjoin(aggMEDIAN, vcMEDN_byCity,  'Keys','City', 'MergeKeys',true, 'Type','left');
+
+% Merge onto non-temporal shells
+A_HYPO_MEANS   = pf_dropIfExists(A_HYPO_MEANS,   string(aggMEAN.Properties.VariableNames));
+A_HYPO_MEDIANS = pf_dropIfExists(A_HYPO_MEDIANS, string(aggMEDIAN.Properties.VariableNames));
+A_HYPO_MEANS   = outerjoin(A_HYPO_MEANS,   aggMEAN,   'Keys','City', 'MergeKeys',true, 'Type','left');
+A_HYPO_MEDIANS = outerjoin(A_HYPO_MEDIANS, aggMEDIAN, 'Keys','City', 'MergeKeys',true, 'Type','left');
+
+% RAW_INCOME_CPI to end
+A_HYPO_MEANS   = pf_move_to_end(A_HYPO_MEANS,   "RAW_INCOME_CPI");
+A_HYPO_MEDIANS = pf_move_to_end(A_HYPO_MEDIANS, "RAW_INCOME_CPI");
+
+%% ---------- Attach City metadata (if available) ----------
+metaPath = fullfile(pwd, 'City_Preliminary_Vars.csv');
+if exist(metaPath,'file') == 2
+    meta = readtable(metaPath);
+
+    % Expect at least: City, BIOMES_cat, KOPPEN_cat, Latitude, Longitude
+    v = string(meta.Properties.VariableNames);
+    if ~ismember("City", v), error('City_Preliminary_Vars.csv must contain a City column.'); end
+    meta.City = string(meta.City);
+
+    % Keep only known columns (ignore extras)
+    keep = intersect(["City","BIOMES_cat","KOPPEN_cat","Latitude","Longitude"], v, 'stable');
+    meta = meta(:, keep);
+
+    % Ensure types
+    if ismember("BIOMES_cat", keep) && ~iscategorical(meta.BIOMES_cat), meta.BIOMES_cat = categorical(meta.BIOMES_cat); end
+    if ismember("KOPPEN_cat", keep) && ~iscategorical(meta.KOPPEN_cat), meta.KOPPEN_cat = categorical(meta.KOPPEN_cat); end
+    if ismember("Latitude",  keep),  meta.Latitude  = double(meta.Latitude);  end
+    if ismember("Longitude", keep),  meta.Longitude = double(meta.Longitude); end
+
+    addMeta = @(A) local_leftjoin_city(A, meta);
+
+    if exist('A_HYPO_MEANS','var')==1,             A_HYPO_MEANS             = addMeta(A_HYPO_MEANS);             end
+    if exist('A_HYPO_MEDIANS','var')==1,           A_HYPO_MEDIANS           = addMeta(A_HYPO_MEDIANS);           end
+    if exist('A_HYPO_MEANS_TEMPORAL','var')==1,    A_HYPO_MEANS_TEMPORAL    = addMeta(A_HYPO_MEANS_TEMPORAL);    end
+    if exist('A_HYPO_MEDIANS_TEMPORAL','var')==1,  A_HYPO_MEDIANS_TEMPORAL  = addMeta(A_HYPO_MEDIANS_TEMPORAL);  end
+
+    fprintf('Merged BIOMES_cat, KOPPEN_cat, Latitude, Longitude from %s\n', metaPath);
+else
+    warning('City_Preliminary_Vars.csv not found in %s — skipping metadata merge.', pwd);
+end
+
+%% -------------------------- Save to base & report --------------------------
+assignin('base','A_HYPO_MEANS',            A_HYPO_MEANS);
+assignin('base','A_HYPO_MEDIANS',          A_HYPO_MEDIANS);
+assignin('base','A_HYPO_MEANS_TEMPORAL',   A_HYPO_MEANS_TEMPORAL);
+assignin('base','A_HYPO_MEDIANS_TEMPORAL', A_HYPO_MEDIANS_TEMPORAL);
+
+fprintf('\n--- Predictor tables built (%d cities) ---\n', numel(CityListMaster));
+fprintf('A_HYPO_MEANS            : %d rows, %d vars\n', height(A_HYPO_MEANS),            width(A_HYPO_MEANS));
+fprintf('A_HYPO_MEDIANS          : %d rows, %d vars\n', height(A_HYPO_MEDIANS),          width(A_HYPO_MEDIANS));
+fprintf('A_HYPO_MEANS_TEMPORAL   : %d rows, %d vars\n', height(A_HYPO_MEANS_TEMPORAL),   width(A_HYPO_MEANS_TEMPORAL));
+fprintf('A_HYPO_MEDIANS_TEMPORAL : %d rows, %d vars\n', height(A_HYPO_MEDIANS_TEMPORAL), width(A_HYPO_MEDIANS_TEMPORAL));
+
+%% ====================== Local helpers (pf_*) ======================
+function T = pf_ensure_city_shell(varName, CityList)
+    Seed = table(CityList, 'VariableNames', {'City'});
+    Seed.City = string(Seed.City);
+    if evalin('base', sprintf('exist(''%s'',''var'')==1', varName))
+        T0 = evalin('base', varName);
+        if istable(T0) && ismember('City', T0.Properties.VariableNames)
+            T0.City = string(T0.City);
+            T = outerjoin(Seed, T0, 'Keys','City', 'MergeKeys',true, 'Type','left');
+        else
+            T = Seed;
         end
-        valid = pct >= threshold & isfinite(col);
-        recM.(vn) = iif(nnz(valid) >= minTracts, mean(col(valid), 'omitnan'), NaN);
-    end
-    rowsMean = [rowsMean; recM]; %#ok<AGROW>
-
-    % --- MEDIAN set (per-city-year) ---
-    recMd = struct('City', city, 'Year', yr);
-    for v = 1:numel(varsForMediansTemporal)
-        vn  = varsForMediansTemporal{v};
-        col = getNumCol(T, vn);
-        if isempty(col)
-            recMd.(vn) = NaN; continue;
-        end
-        valid = pct >= threshold & isfinite(col);
-        recMd.(vn) = iif(nnz(valid) >= minTracts, median(col(valid), 'omitnan'), NaN);
-    end
-    rowsMedian = [rowsMedian; recMd]; %#ok<AGROW>
-end
-
-% Convert to tables and filter to included cities
-meanTemporal   = toTemporalTable(rowsMean, includeCities);
-medianTemporal = toTemporalTable(rowsMedian, includeCities);
-
-%% ---- pass 2: merge into *_TEMPORAL (left-join on City,Year) ----
-A_HYPO_MEANS_TEMPORAL = ensureTable(A_HYPO_MEANS_TEMPORAL);
-A_HYPO_MEDIANS_TEMPORAL = ensureTable(A_HYPO_MEDIANS_TEMPORAL);
-
-A_HYPO_MEANS_TEMPORAL.City = string(A_HYPO_MEANS_TEMPORAL.City);
-A_HYPO_MEANS_TEMPORAL.Year = double(A_HYPO_MEANS_TEMPORAL.Year);
-A_HYPO_MEANS_TEMPORAL = dropIfExists(A_HYPO_MEANS_TEMPORAL, varsForMeansTemporal);
-A_HYPO_MEANS_TEMPORAL = outerjoin(A_HYPO_MEANS_TEMPORAL, meanTemporal, ...
-    'Keys', {'City','Year'}, 'MergeKeys', true, 'Type', 'left');
-A_HYPO_MEANS_TEMPORAL = A_HYPO_MEANS_TEMPORAL(ismember(A_HYPO_MEANS_TEMPORAL.City, includeCities), :);
-
-A_HYPO_MEDIANS_TEMPORAL.City = string(A_HYPO_MEDIANS_TEMPORAL.City);
-A_HYPO_MEDIANS_TEMPORAL.Year = double(A_HYPO_MEDIANS_TEMPORAL.Year);
-A_HYPO_MEDIANS_TEMPORAL = dropIfExists(A_HYPO_MEDIANS_TEMPORAL, varsForMediansTemporal);
-A_HYPO_MEDIANS_TEMPORAL = outerjoin(A_HYPO_MEDIANS_TEMPORAL, medianTemporal, ...
-    'Keys', {'City','Year'}, 'MergeKeys', true, 'Type', 'left');
-A_HYPO_MEDIANS_TEMPORAL = A_HYPO_MEDIANS_TEMPORAL(ismember(A_HYPO_MEDIANS_TEMPORAL.City, includeCities), :);
-
-%% ---- pass 3: collapse across years and merge into non-temporal ----
-aggMean   = collapseAcrossYears(meanTemporal,   varsForMeansTemporal,   @mean);
-aggMedian = collapseAcrossYears(medianTemporal, varsForMediansTemporal, @median);
-
-A_HYPO_MEANS   = filterAndMergeNonTemporal(A_HYPO_MEANS,   aggMean,   includeCities, varsForMeansTemporal);
-A_HYPO_MEDIANS = filterAndMergeNonTemporal(A_HYPO_MEDIANS, aggMedian, includeCities, varsForMediansTemporal);
-
-%% ---- summary ----
-fprintf('\nSTRICT filter: city kept only if EVERY city-year has coverage ≥ %g%% AND ≥ %d tracts.\n', threshold, minTracts);
-fprintf('Excluded (hard list): %s\n', strjoin(excludeList, ', '));
-fprintf('Included cities: %d\n', numel(includeCities));
-fprintf('  • A_HYPO_MEANS_TEMPORAL: %d rows, +%d cols\n', ...
-    height(A_HYPO_MEANS_TEMPORAL), numel(varsForMeansTemporal));
-fprintf('  • A_HYPO_MEDIANS_TEMPORAL: %d rows, +%d cols\n', ...
-    height(A_HYPO_MEDIANS_TEMPORAL), numel(varsForMediansTemporal));
-fprintf('  • A_HYPO_MEANS: %d rows, +%d cols (city-avg across years)\n', ...
-    height(A_HYPO_MEANS), numel(varsForMeansTemporal));
-fprintf('  • A_HYPO_MEDIANS: %d rows, +%d cols (city-median across years)\n', ...
-    height(A_HYPO_MEDIANS), numel(varsForMediansTemporal));
-
-%% ---- push results back to base ----
-assignin('base','A_HYPO_MEANS',A_HYPO_MEANS);
-assignin('base','A_HYPO_MEDIANS',A_HYPO_MEDIANS);
-assignin('base','A_HYPO_MEANS_TEMPORAL',A_HYPO_MEANS_TEMPORAL);
-assignin('base','A_HYPO_MEDIANS_TEMPORAL',A_HYPO_MEDIANS_TEMPORAL);
-assignin('base','CityNames',includeCities);
-
-clearvars -except CENSUS_TABLES_new A_HYPO_MEANS A_HYPO_MEANS_TEMPORAL A_HYPO_MEDIANS A_HYPO_MEDIANS_TEMPORAL
-
-%% ====== local helpers ======
-function T = fetchOrEmpty(varName)
-    try
-        T = evalin('base', varName);
-        if ~istable(T), T = table(string.empty(0,1), zeros(0,1), 'VariableNames', {'City','Year'}); end
-    catch
-        T = table(string.empty(0,1), zeros(0,1), 'VariableNames', {'City','Year'});
-    end
-end
-
-function name = findFirstVar(vnames, candidates)
-    name = '';
-    for k = 1:numel(candidates)
-        j = find(strcmpi(vnames, candidates{k}), 1, 'first');
-        if ~isempty(j), name = vnames{j}; return; end
-    end
-end
-
-function col = getNumCol(T, name)
-    vnames = T.Properties.VariableNames;
-    j = find(strcmpi(vnames, name), 1, 'first');
-    if isempty(j)
-        col = [];
-        return;
-    end
-    raw = T.(vnames{j});
-    if isnumeric(raw)
-        col = double(raw);
     else
-        col = str2double(regexprep(string(raw), '[,\$%]', ''));
+        T = Seed;
     end
-    % Treat sentinel -222222222 as missing
-    col(col == -222222222) = NaN;
+    T = movevars(T, 'City', 'Before', 1);
 end
 
-function out = iif(cond, a, b), if cond, out=a; else, out=b; end, end
-
-function TT = toTemporalTable(rows, includeCities)
-    if isempty(rows)
-        TT = table(string.empty(0,1), zeros(0,1), 'VariableNames', {'City','Year'});
-    else
-        TT = struct2table(rows);
-        TT.City = string(TT.City);
-        TT.Year = double(TT.Year);
-        if ~isempty(includeCities)
-            TT = TT(ismember(TT.City, includeCities), :);
+function T = pf_ensure_temporal_shell(varName, CY)
+    Seed = CY;
+    Seed.City = string(Seed.City);
+    Seed.Year = double(Seed.Year);
+    if evalin('base', sprintf('exist(''%s'',''var'')==1', varName))
+        T0 = evalin('base', varName);
+        if istable(T0) && all(ismember({'City','Year'}, T0.Properties.VariableNames))
+            T0.City = string(T0.City);
+            T0.Year = double(T0.Year);
+            T = outerjoin(Seed, T0, 'Keys', {'City','Year'}, 'MergeKeys',true, 'Type','left');
+        else
+            T = Seed;
         end
+    else
+        T = Seed;
     end
+    T = movevars(T, {'City','Year'}, 'Before', 1);
 end
 
-function TT = ensureTable(TT)
-    if isempty(TT)
-        TT = table(string.empty(0,1), zeros(0,1), 'VariableNames', {'City','Year'});
-    end
-end
+function agg = pf_collapseAcrossYears(TT, varList, reducerFcn)
+% Collapse a City–Year table to one row per City using mean/median, etc.
+% - TT must contain columns: City, Year, and vars in varList (if present).
+% - reducerFcn: e.g., @mean or @median (applied with 'omitnan').
 
-function agg = collapseAcrossYears(TT, varList, reducerFcn)
-    if isempty(TT) || height(TT)==0
+    if isempty(TT) || ~istable(TT)
         agg = table(string.empty(0,1), 'VariableNames', {'City'});
         return
     end
-    G = findgroups(TT.City);
-    CU = splitapply(@(c) c(1), TT.City, G);
+
+    % Ensure types
+    if ~isstring(TT.City), TT.City = string(TT.City); end
+    if ~isnumeric(TT.Year), TT.Year = double(TT.Year); end
+
+    % One row per City
+    G   = findgroups(TT.City);
+    CU  = splitapply(@(c) c(1), TT.City, G);
     agg = table(CU, 'VariableNames', {'City'});
-    for v = 1:numel(varList)
-        vn = varList{v};
-        if ismember(vn, TT.Properties.VariableNames)
-            if isequal(func2str(reducerFcn),'median')
-                agg.(vn) = splitapply(@(x) median(x,'omitnan'), TT.(vn), G);
-            else
-                agg.(vn) = splitapply(@(x) mean(x,'omitnan'), TT.(vn), G);
-            end
+
+    % Normalize var list
+    varList = string(varList(:));
+
+    % Reducer that omits NaNs
+    fnum = @(x) reducerFcn(x, 'omitnan');
+
+    for k = 1:numel(varList)
+        vn = varList(k);
+        if ~ismember(vn, string(TT.Properties.VariableNames))
+            agg.(vn) = NaN(height(agg),1);
+            continue
+        end
+
+        col = TT.(vn);
+        % Accept numeric/logical only (your harmonized tables are numeric)
+        if isnumeric(col) || islogical(col)
+            agg.(vn) = splitapply(fnum, double(col), G);
         else
+            % Non-numeric → fill with NaN
             agg.(vn) = NaN(height(agg),1);
         end
     end
 end
 
-function A = filterAndMergeNonTemporal(A, agg, includeCities, varList)
-    A = ensureCityOnly(A);
-    if ~isempty(includeCities)
-        A = A(ismember(string(A.City), includeCities), :);
-        agg = agg(ismember(string(agg.City), includeCities), :);
+function A = pf_move_to_end(A, varName)
+    if isempty(A) || ~istable(A), return; end
+    v = string(A.Properties.VariableNames);
+    hit = find(strcmpi(v, string(varName)), 1, 'first');
+    if ~isempty(hit) && hit < numel(v)
+        A = movevars(A, v(hit), 'After', v(end));
     end
-    A = dropIfExists(A, varList);
-    A = outerjoin(A, agg, 'Keys', 'City', 'MergeKeys', true, 'Type', 'left');
 end
 
-function A = ensureCityOnly(A)
-    if isempty(A)
-        A = table(string.empty(0,1), 'VariableNames', {'City'});
-        return
+function y = pf_numcol(T, V, name)
+    if ismember(name, V)
+        raw = T.(char(name));
+        y = double(raw);
+        y(y == -222222222) = NaN;
+    else
+        y = NaN(height(T),1);
     end
-    if ~ismember('City', A.Properties.VariableNames)
-        error('Non-temporal table is missing "City" column.');
-    end
-    A.City = string(A.City);
 end
 
-function A = dropIfExists(A, names)
+function b1 = pf_slope_if_ok(x10k, y, cov, covThr, nMin)
+    ok = isfinite(x10k) & isfinite(y) & isfinite(cov) & cov >= covThr;
+    if nnz(ok) < nMin || var(x10k(ok),'omitnan')==0, b1 = NaN; return; end
+    x = x10k(ok); yy = y(ok);
+    xb = mean(x); yb = mean(yy);
+    Sxx = sum((x - xb).^2);
+    if Sxx == 0, b1 = NaN; else, b1 = sum((x - xb).*(yy - yb)) / Sxx; end
+end
+
+function b1 = pf_pair_slope_if_ok(x_ndvi, y_lst, cov, covThr, nMin)
+    ok = isfinite(x_ndvi) & isfinite(y_lst) & isfinite(cov) & cov >= covThr;
+    if nnz(ok) < nMin || var(x_ndvi(ok),'omitnan')==0, b1 = NaN; return; end
+    x = x_ndvi(ok); yy = y_lst(ok);
+    xb = mean(x); yb = mean(yy);
+    Sxx = sum((x - xb).^2);
+    if Sxx == 0, b1 = NaN; else, b1 = sum((x - xb).*(yy - yb)) / Sxx; end
+end
+
+function TT = pf_struct2temporal(rows)
+    if isempty(rows)
+        TT = table(string.empty(0,1), zeros(0,1), 'VariableNames', {'City','Year'});
+    else
+        TT = struct2table(rows);
+        if ~ismember('City', TT.Properties.VariableNames), TT.City = string(TT.City); end
+        TT.City = string(TT.City);
+        if ~ismember('Year', TT.Properties.VariableNames), TT.Year = double(TT.Year); end
+        TT.Year = double(TT.Year);
+    end
+end
+
+function A = pf_dropIfExists(A, names)
     if isempty(A) || isempty(names), return; end
-    vA = A.Properties.VariableNames;
-    kill = false(1, numel(vA));
-    for i = 1:numel(vA)
-        if any(strcmpi(vA{i}, names))
-            kill(i) = true;
-        end
-    end
+    vA = string(A.Properties.VariableNames);
+    names = string(names);
+    names = setdiff(names, ["City","Year"]);
+    kill = ismember(vA, names);
     A(:, kill) = [];
+end
+
+function A = local_leftjoin_city(A, meta)
+    if isempty(A) || ~istable(A), return; end
+    if ~ismember('City', A.Properties.VariableNames), return; end
+    A.City = string(A.City);
+    meta.City = string(meta.City);
+    % Drop pre-existing metadata columns to avoid suffixes
+    drop = intersect({'BIOMES_cat','KOPPEN_cat','Latitude','Longitude'}, string(A.Properties.VariableNames));
+    if ~isempty(drop), A(:, drop) = []; end
+    A = outerjoin(A, meta, 'Keys','City', 'MergeKeys',true, 'Type','left');
 end
