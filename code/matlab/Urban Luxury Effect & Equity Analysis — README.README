@@ -287,15 +287,24 @@ If you use this repository or its outputs, please cite:
 
 Example:
 
-> Kucera, Dion, G. Darrel Jenerette. (2025). *Urban Luxury Effect & Equity Analysis – MATLAB workflows*. GitHub repository.
-> Data: Zenodo. [https://doi.org/10.5281/zenodo.17203136]
+> Kucera, Dion, G. Darrel Jenerette. (2025). Urban Luxury Effect & Equity Analysis — MATLAB workflows (R2024b). Zenodo. 10.5281/zenodo.17203136
+> Data: Zenodo. https://doi.org/10.5281/zenodo.17239176
 
 ---
 
 ## License
 
-Choose a license and place it in `LICENSE` (e.g., MIT, Apache-2.0).
-If unsure, MIT is common for academic code repositories.
+Copyright © 2025 Dion Kucera
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the “Software”),
+to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense,
+and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED “AS IS”, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, 
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY,
+WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ---
 
