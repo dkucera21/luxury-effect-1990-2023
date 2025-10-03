@@ -1,0 +1,349 @@
+# Urban Luxury Effect & Equity Analysis — README
+
+> MATLAB workflows for quantifying the “luxury effect” (income–NDVI/LST), its change through time, and green–heat equity across U.S. cities (1990–2023). Includes end-to-end scripts to rebuild tract-level city panels, derive predictors, fit mixed-effects/OLS models, generate figures, and run hypothesis tests.
+
+---
+
+## At a glance
+
+* **Language / version**: MATLAB **R2024b** (developed in 2025)
+* **Primary inputs**: CSV tables + city boundary geopackage hosted on **Zenodo**
+  **DOI**: `10.5281/zenodo.17239176`
+* **Minimal data** (everything except `FIG_2_and_5_pdp_two_row.m`): **`NEW_MAT_TABLES.zip`** from Zenodo
+* **Full data** (climate + NHGIS predictors, needed for regression/prediction and Fig. 2 & 5): remaining CSVs on Zenodo
+* **Core outputs**: Rebuilt census tables (`CENSUS_TABLES_rebuilt`), city list (`CityListMaster`), predictor tables (`A_HYPO_*`), trend tables (`A_HYPO_TRENDS*`), equity panel & summary (`CityEquity`, `equity_city_changes.csv`), and manuscript figures
+
+---
+
+## Repository contents
+
+### Pipeline scripts (run in order)
+
+1. `Step1_build_census_tables.m`
+   Rebuilds tract-level city tables and filters to a valid analysis set.
+2. `Step2_build_predictor_tables_from_census.m`
+   Aggregates city-year panels to city means/medians; computes per-city/year luxury effect and NDVI→LST “vegetative cooling”; attaches bioclimate metadata.
+3. `Step3_update_predictors_with_external_dataset_and_LME.m`
+   (Only required for Fig. 2 & 5 & regression) Joins climate+NHGIS predictors, builds per-city trends, mixed-effects luxury-effect trends, and Z-scored variants.
+4. `Step4_equity_build_and_analyze.m`
+   Constructs tail-based equity panels (Top vs Bottom income tails), fits LMEs/OLS, labels cities, computes per-city equity deltas, saves `equity_city_changes.csv`.
+
+### Analysis scripts
+
+* `analysis_city_trend_heterogeneity.m` — tests genuine inter-urban heterogeneity in the luxury-effect trend.
+* `analysis_equity_by_climate_tests.m` — ANOVA: equity vs biome/Köppen classes.
+* `analysis_equity_gap_half_life_and_intersection.m` — projects FE trends to estimate half-life of NDVI/LST gaps and tail intersections.
+* `analysis_mean_median_luxury_effect.m` — descriptive stats for mean/median luxury effect (pooled and city-averaged); changes 1990→2023.
+* `analysis_mixed_effects_luxury_change_through_time.m` — summary of LME-based change in luxury effect.
+* `analysis_pairwise_luxury_effect_change.m` — OLS pairwise changes (1990–2023) with BH-FDR; **contextual** only (manuscript relies on LME).
+* `analysis_anova_luxury_effect_by_classes.m` — ANOVA for luxury effect (mean/median) by biome/Köppen (with Tukey post-hoc).
+
+### Figure scripts
+
+* `FIG_2_and_5_pdp_two_row.m` — partial-dependence/elastic-net figure suite (requires Step 3 data).
+
+  > Notes: bottom row (income–LST trend) is dominated by the income–NDVI trend; other selected predictors should be ignored as noise.
+* `FIG_3_dumbbell_income_slopes.m` — dumbbell plot of income–NDVI/LST per-tail slopes.
+* `FIG_4_equity_summary.m` — per-city equity deltas and balance summaries.
+* `FIG_extra_equity_by_bioclimate_boxplots.m` — equity vs biome/Köppen boxplots.
+* `FIG_S1_trend_by_city_with_CIs.m` — per-city LME trends with confidence intervals.
+* `FIG_S2_equity_scatter_by_bioclimate.m` — scatter summaries by bioclimate.
+* `city_trends_and_pairwise.m`, `analysis_equity_gap_half_life_and_intersection.m` — utilities used by figures.
+
+---
+
+## Data dependencies
+
+### Where to get the data
+
+* **Zenodo DOI**: `10.5281/zenodo.17239176`
+* **Minimal package**: `NEW_MAT_TABLES.zip` (required for **Steps 1–2 & 4**, all analyses & figures **except** Fig. 2 & 5)
+* **Full package**: all additional climate + NHGIS CSVs and city boundaries geopackage (required for **Step 3** and `FIG_2_and_5_pdp_two_row.m`)
+
+### Place the data
+
+* Download the files locally and update the `baseDir` (or equivalent path variable) at the top of **Step 1** and **Step 3** to point to your data folder.
+
+---
+
+## Software & environment
+
+* MATLAB **R2024b** with Statistics and Machine Learning Toolbox (for `fitlm`, `fitlme`, `anovan`, `kruskalwallis`, `multcompare`).
+* Memory: standard laptop/desktop is sufficient (panel sizes are modest).
+* OS: Windows/macOS/Linux (paths in the scripts use standard `fullfile`; adjust `baseDir`).
+
+---
+
+## Quickstart
+
+```matlab
+% 0) Set MATLAB current folder to the repo root.
+% 1) Run Step 1 – rebuild and filter city/tract data:
+Step1_build_census_tables
+
+% 2) Run Step 2 – build predictors from census tables:
+%    Requires City_Preliminary_Vars.csv in working dir (see Zenodo).
+Step2_build_predictor_tables_from_census
+
+% 3) (Optional, only for Fig. 2 & 5 + regression) Run Step 3 – join climate/NHGIS predictors, build trends & Z:
+Step3_update_predictors_with_external_dataset_and_LME
+
+% 4) Run Step 4 – build equity panels and summary tables:
+Step4_equity_build_and_analyze
+```
+
+* After Step 4 completes, run any **analysis** scripts or generate **figures**.
+
+---
+
+## What each step does (and produces)
+
+### Step 1 — Build census tables
+
+* **Input**: `NEW_MAT_TABLES.zip` CSVs
+* **Filters** (tract level):
+
+  * `PCT_OVERLAP` (valid Landsat overlap using 1990 city boundary; values in 0–100 or 0–1 detected automatically)
+  * `POP_DENSITY` (drop 0/NaN)
+  * Income (drop 0/NaN)
+* **City retention**: cities with **≥5** valid tracts per **city-year**
+
+  * 104 cities in raw inputs → **87** retained (list in `CityListMaster`)
+* **Outputs** (workspace):
+
+  * `CENSUS_TABLES_rebuilt` (struct of city-year tract tables; **all 104** cities preserved for optional downstream work)
+  * `CityListMaster` (87 valid cities used in analysis)
+
+### Step 2 — Build predictor tables from census
+
+* **Input**: outputs from Step 1 + `City_Preliminary_Vars.csv` (biome, Köppen class, latitude, longitude) for the **87** valid cities
+* **Derived variables**:
+
+  * **Luxury effect** per city-year: income–NDVI and income–LST (units **per $10k** CPI-deflated)
+  * **Vegetative cooling** per city-year: NDVI→LST association
+  * **Inter-urban income metrics**:
+
+    * `incZ_among_cities` — standardised CPI-deflated income among the 87 cities (by year)
+    * `incZ_among_cities_2023` — same, but standardised using **2023** only
+
+    > These are **inter-urban**; they do **not** leak information into **intra-urban** luxury-effect terms.
+* **Outputs**:
+
+  * `A_HYPO_MEANS`, `A_HYPO_MEDIANS` — 1990–2023 city-level long-run **means/medians**
+  * `A_HYPO_MEANS_TEMPORAL`, `A_HYPO_MEDIANS_TEMPORAL` — city-year panels (useful for LMEs; the pipeline itself uses `CENSUS_TABLES_rebuilt`)
+  * `LUX_MEAN_T`, `LUX_MEDN_T` — per city-year luxury effect (mean/median specification)
+  * `luxMEAN_byCity`, `luxMEDN_byCity` — 1990–2023 mean/median luxury effect, per city
+
+### Step 3 — Join external predictors, build trends, Z-score (optional for regression & Fig. 2/5)
+
+* **Input**: climate + NHGIS CSVs from Zenodo (full package)
+* **What it does**:
+
+  * Joins climate/NHGIS tables (city and city-year levels) to `A_HYPO_*`
+  * Builds **trend tables**, where:
+
+    * Columns prefixed **`TRENDS_`** are the **OLS annual slope** (1990–2023) of that variable
+    * Columns prefixed **`MEAN_`** are the long-run means copied from `A_HYPO_MEANS`
+  * Computes **mixed-effects (LME)** luxury-effect **trend** terms (interaction `inc10k × yearC`), plus **per-city BLUP** adjustments; robust two-stage fallback if needed
+  * Builds **Z-scored** versions of all main tables (mean imputation for missing values; categoricals and constant columns are skipped)
+* **Outputs**:
+
+  * `A_HYPO_TRENDS` (trend + mean features; **prefix-safe**: existing columns are overwritten cleanly, no `TRENDS_TRENDS_*`)
+  * `A_HYPO_TRENDS_pvals` (parallel p-values for trends)
+  * `A_HYPO_*_Z` (Z-scored: MEANS, MEDIANS, TRENDS)
+
+> **Reproducibility note**: Subsequent scripts that rely on LME slopes **recompute** key LME metrics rather than trusting cached values from Step 3.
+
+### Step 4 — Equity build & analysis (required for all equity work)
+
+* **Approach**: Tail-based equity using income split into **Bottom** and **Top** tails (default tail = 20%; with minimum tail sizes per city-year)
+* **Models**:
+
+  * Stacked long-tables LMEs with random slopes (time × tail) where supported
+  * OLS checks for identities and sanity
+* **Outputs**:
+
+  * `equity_city_changes.csv` — per-city equity summary
+
+    * `Slope_*` columns: **OLS** per-decade slopes
+    * `LME_*` columns: **LME** city-specific deltas and **95% CI**
+    * `NDVI_Balance` and `NDVI_Mechanism` fields:
+
+      * `NDVI_Balance = |Bottom slope| − |Top slope|`
+
+        * **Positive** → **bottom-tail greening** dominates (“uplift”)
+        * **Negative** → **top-tail decline** dominates (“erosion”)
+        * Near zero → “both”
+      * `NDVI_Mechanism` = `"uplift (bottom-tail greening)" | "erosion (top-tail decline)" | "both"`
+  * `CityEquity` — workspace table used in later equity analyses
+  * Tail panel (`Panel`), long tables (`Tlong_*`), fitted models (`lmeN`, `lmeL`), and summary structs (`S`)
+
+> **Interpretation**: For **equity comparisons across cities**, use **LME** terms (e.g., `LME_DeltaSlope_NDVI`, `LME_DeltaSlope_LST`) and their CIs. The **NDVI balance index** summarizes which tail drives equity change.
+
+---
+
+## How the equity metrics are defined
+
+* **Top/Bottom tails**: income-sorted tracts per city-year; default 20% tails (with guards for small city-years)
+* **Gap variables**:
+
+  * `Gap_NDVI = Top_NDVI − Bot_NDVI` (greener rich vs poor → larger positive gap)
+  * `Gap_LST  = Bot_LST − Top_LST` (hotter poor vs rich → larger positive gap)
+* **Equity gains**:
+
+  * NDVI equity improves when **Top − Bottom** becomes **more negative** (Top falls, Bottom rises, or both)
+  * LST equity improves when **Bottom − Top** becomes **more negative** (Bottom cools, Top warms, or both)
+* **NDVI Balance**:
+
+  * `NDVI_Balance = |Bottom slope| − |Top slope|`
+  * Sign tells whether equity gains are **uplift** (bottom-tail greening), **erosion** (top-tail loss), or **both**
+
+---
+
+## Running the analyses (after Step 4)
+
+You can run the analysis scripts in any order; they consume workspace tables generated by the steps above.
+
+* **Trend heterogeneity**: `analysis_city_trend_heterogeneity.m`
+* **Equity vs bioclimate**: `analysis_equity_by_climate_tests.m` (ANOVA + Tukey; Köppen and Biome)
+* **Equity half-life & intersection**: `analysis_equity_gap_half_life_and_intersection.m`
+* **Luxury effect summaries**: `analysis_mean_median_luxury_effect.m`
+* **LME change in luxury effect**: `analysis_mixed_effects_luxury_change_through_time.m`
+* **OLS pairwise change**: `analysis_pairwise_luxury_effect_change.m` (BH-FDR; manuscript relies on LME)
+
+---
+
+## Figures
+
+* Recreate manuscript figures with the `FIG_*` scripts. Many have small toggles for mean vs median, sort orders, etc.
+* **`FIG_2_and_5_pdp_two_row.m`**: requires **Step 3** (predictors). The top row (income–NDVI trend) uses elastic-net/PDP. The bottom row (income–LST trend) is **effectively explained only by the income–NDVI trend**; ignore other selected predictors as overfitting noise (the manuscript bottom panel is an OLS between the two trends; that exact scatter is *not* redrawn here).
+
+---
+
+## Suggested folder structure
+
+```
+repo/
+  ├─ code/                            % (optional) if you prefer to separate
+  ├─ data/                            % your local copy of Zenodo CSVs/GPkg
+  ├─ outputs/                         % figures, CSVs (e.g., equity_city_changes.csv)
+  ├─ README.md
+  ├─ Step1_build_census_tables.m
+  ├─ Step2_build_predictor_tables_from_census.m
+  ├─ Step3_update_predictors_with_external_dataset_and_LME.m
+  ├─ Step4_equity_build_and_analyze.m
+  ├─ analysis_*.m
+  ├─ FIG_*.m
+```
+
+> Update `baseDir` (or equivalent path variables) in **Step 1** & **Step 3** to point to your `data/` folder.
+
+---
+
+## Reproducibility notes
+
+* All modelling and data wrangling are scripted.
+* LMEs are refit in downstream scripts to avoid reliance on cached Step-3 outputs.
+* Tail splits use fixed rules and minimum tail sizes.
+* Z-scores use **mean imputation** for missing values, skip categoricals/constants.
+
+---
+
+## Common pitfalls & troubleshooting
+
+* **Missing data**: Ensure you downloaded the **minimal** `NEW_MAT_TABLES.zip` (for Steps 1–2 & 4) and the **full** CSVs (for Step 3 and Fig. 2/5).
+* **Paths**: Update `baseDir` at the top of Step 1 and Step 3 to your data location.
+* **City_Preliminary_Vars.csv** missing (Step 2): Must be in the working directory; it provides **Biome**, **Köppen**, **Latitude**, **Longitude** for the **87** valid cities.
+* **`TRENDS_TRENDS_*` columns**: The Step-3 script **drops collisions before renaming**; if you imported prior intermediate tables, clear them or start from a clean workspace.
+* **Duplicate variable names when renaming**: We defensively remove any existing targets before prefixing (`TRENDS_`, `MEAN_`).
+* **Overlap units**: `PCT_OVERLAP` is auto-detected as 0–100 or 0–1; thresholding is robust.
+* **Edge-case city-years**: Very small panels may skip LMEs or fall back to OLS two-stage estimates; this is expected.
+
+---
+
+## Glossary (key variables)
+
+* **NDVI**: mean Normalized Difference Vegetation Index at tract/city levels
+* **LST**: mean Land Surface Temperature (°C)
+* **Luxury effect**: slope of `NDVI ~ income` (or `LST ~ income`) **within** a city, per year; reported **per $10,000**
+* **Vegetative cooling**: slope of `LST ~ NDVI` within a city, per year
+* **`incZ_among_cities`**: CPI-deflated household income z-scored **across cities** each year (inter-urban)
+* **`incZ_among_cities_2023`**: same, but z-scored on **2023** values
+* **Equity gaps**:
+
+  * `Gap_NDVI = Top_NDVI − Bot_NDVI`
+  * `Gap_LST  = Bot_LST − Top_LST`
+* **NDVI Balance**: `|Bottom slope| − |Top slope|` → mechanism label (uplift/erosion/both)
+* **LME_DeltaSlope_* **: city-specific tail-gap change derived from mixed-effects (preferred for cross-city inference)
+
+---
+
+## Citing
+
+If you use this repository or its outputs, please cite:
+
+* **Data**: Zenodo dataset at DOI `10.5281/zenodo.17239176`
+* **Code**: This GitHub repository at DOI `10.5281/zenodo.17203136`
+
+Example:
+
+> Kucera, Dion, G. Darrel Jenerette. (2025). *Urban Luxury Effect & Equity Analysis – MATLAB workflows*. GitHub repository.
+> Data: Zenodo. [https://doi.org/10.5281/zenodo.17203136]
+
+---
+
+## License
+
+Choose a license and place it in `LICENSE` (e.g., MIT, Apache-2.0).
+If unsure, MIT is common for academic code repositories.
+
+---
+
+## Contributing
+
+Pull requests and issues are welcome. Please:
+
+* Describe data & environment (MATLAB version, OS)
+* Provide minimal reproducible snippets
+* Clearly indicate whether a bug is in data ingestion, modelling, or plotting
+
+---
+
+## A minimal run checklist
+
+* [ ] MATLAB R2024b installed (Stats toolbox)
+* [ ] Download **`NEW_MAT_TABLES.zip`** from Zenodo
+* [ ] Place `City_Preliminary_Vars.csv` in the working directory (from Zenodo)
+* [ ] Set `baseDir` in Step 1 (and Step 3 if using full predictors)
+* [ ] Run Steps **1 → 2 → (3 optional) → 4**
+* [ ] Verify `equity_city_changes.csv` created
+* [ ] Generate figures / run analysis scripts
+
+---
+
+## Pipeline overview (ASCII)
+
+```
+RAW CSVs (Zenodo) ──► Step 1 ──► CENSUS_TABLES_rebuilt + CityListMaster
+                                 │
+                                 └─► Step 2 ──► A_HYPO_MEANS / MEDIANS / TEMPORAL + LUX_* tables
+                                                │
+                     (optional predictors)      └─► Step 3 ──► A_HYPO_TRENDS (+ Z-scored tables)
+                                                │
+                                                └─► Step 4 ──► CityEquity + equity_city_changes.csv
+                                                                 │
+                                                                 ├─► Analysis_* scripts
+                                                                 └─► FIG_* scripts
+```
+
+---
+
+## Notes on methodological choices
+
+* **Why LME for change through time?** Year-centered interactions with random slopes capture city-specific deviations while borrowing strength across cities; OLS pairwise changes are reported only as context.
+* **Why trend + mean in `A_HYPO_TRENDS`?** Long-term outcomes can be shaped by both background climate/state (means) and directional change (trends). Including both makes the feature space explicit.
+* **Tail equity** focuses on structural differences between poorer and richer tracts and allows interpretable mechanisms via the **NDVI balance** index (uplift vs erosion).
+
+---
+
+If anything doesn’t run on your machine, open an issue with the error text, your MATLAB version, and the script you ran right before the error.

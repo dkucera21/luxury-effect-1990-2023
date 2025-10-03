@@ -1,31 +1,55 @@
 %% anova_luxury_effect_by_classes.m  (SCRIPT)
 % -------------------------------------------------------------------------
-% Test whether city-level luxury-effect slopes (per $10k) differ by
-% Köppen climate and by Biome.
+% Test whether city-level luxury-effect slopes differ by Köppen climate and
+% by Biome. Robust to multiple column name variants.
 %
-% Requires in workspace:
-%   A_HYPO_MEANS with columns:
-%     - LUX_NDVI_per10k, LUX_LST_per10k
-%     - KoppenClimate_cat (or KOPPEN_cat or koppen)
-%     - BIOMES_cat        (or biome)
+% Requires in workspace: A_HYPO_MEANS (table)
+% Acceptable column name aliases:
+%   NDVI luxury slope:  "LUX_NDVI_per10k","NDVI_LUX_per10k",
+%                       "NDVI_LUX_TREND","lux_ndvi_per10k",
+%                       "lux_ndvi_slope","NDVI_LUX_SLOPE"
+%   LST  luxury slope:  "LUX_LST_per10k","LST_LUX_per10k",
+%                       "LST_LUX_TREND","lux_lst_per10k",
+%                       "lux_lst_slope","LST_LUX_SLOPE"
+%   Köppen category:    "KoppenClimate_cat","KOPPEN_cat","koppen","koppen_cat"
+%   Biome category:     "BIOMES_cat","Biome","biome","biomes_cat"
 % -------------------------------------------------------------------------
 
 %% ------------------ Load & normalize ------------------
 assert(exist('A_HYPO_MEANS','var')==1 && istable(A_HYPO_MEANS), ...
     'A_HYPO_MEANS not found. Build it first.');
 
-T = A_HYPO_TRENDS
+T = A_HYPO_MEANS;
 v = string(T.Properties.VariableNames);
-getcol = @(alts) v( find(ismember(lower(v), lower(string(alts))), 1, 'first') );
 
-cLuxN = getcol("TRENDS_LME_LE_MEAN_NDVI_per10k");
-cLuxL = getcol("TRENDS_LME_LE_MEAN_LST_per10k");
-cKop  = getcol(["KoppenClimate_cat","KOPPEN_cat","koppen"]);
-cBio  = getcol(["BIOMES_cat","biome"]);
+% Helper: first matching column name from a list of aliases (case-insensitive)
+find_col = @(aliases) v( find(ismember(lower(v), lower(string(aliases))), 1, 'first') );
 
-assert(~isempty(cLuxN) && ~isempty(cLuxL) && ~isempty(cKop) && ~isempty(cBio), ...
-    'Required columns missing (need LUX_NDVI_per10k, LUX_LST_per10k, and Köppen/Biome).');
+% Aliases
+luxN_aliases = ["LUX_NDVI_per10k","NDVI_LUX_per10k","NDVI_LUX_TREND","lux_ndvi_per10k","lux_ndvi_slope","NDVI_LUX_SLOPE"];
+luxL_aliases = ["LUX_LST_per10k", "LST_LUX_per10k", "LST_LUX_TREND", "lux_lst_per10k", "lux_lst_slope", "LST_LUX_SLOPE"];
+kop_aliases  = ["KoppenClimate_cat","KOPPEN_cat","koppen","koppen_cat"];
+bio_aliases  = ["BIOMES_cat","Biome","biome","biomes_cat"];
 
+% Resolve names present in the table
+cLuxN = find_col(luxN_aliases);
+cLuxL = find_col(luxL_aliases);
+cKop  = find_col(kop_aliases);
+cBio  = find_col(bio_aliases);
+
+% Helpful assert with diagnostics
+if isempty(cLuxN) || isempty(cLuxL) || isempty(cKop) || isempty(cBio)
+    msg = compose("Columns present: %s", strjoin(v, ', '));
+    need = [
+        "Need one NDVI luxury column among: " + strjoin(luxN_aliases, ", ")
+        "Need one LST  luxury column among: " + strjoin(luxL_aliases, ", ")
+        "Need one Köppen column among:      " + strjoin(kop_aliases,  ", ")
+        "Need one Biome column among:       " + strjoin(bio_aliases,  ", ")
+    ];
+    error("Required columns missing.\n%s\n\n%s", strjoin(need,newline), msg);
+end
+
+% Pull series
 ndvi   = T.(cLuxN);
 lst    = T.(cLuxL);
 kopAll = T.(cKop);
@@ -35,6 +59,11 @@ bioAll = T.(cBio);
 if ~iscategorical(kopAll), kopAll = categorical(string(kopAll)); end
 if ~iscategorical(bioAll), bioAll = categorical(string(bioAll)); end
 
+% Label strings for printing (use the actual names found)
+labelLuxN = char(cLuxN);
+labelLuxL = char(cLuxL);
+
+% Tiny wrapper for consistent outputs
 run_oneway = @(y,g) struct('anova', local_anova1(y,g), 'kw', local_kw(y,g));
 
 %% ------------------ NDVI slope ------------------
@@ -55,7 +84,7 @@ res_ndvi_biome = run_oneway(ndvi(okB), removecats(bioAll(okB)));
 
 % Two-way (Köppen × Biome) on filtered rows
 bio0 = removecats(bioAll(ok0));     % subset by ok0
-bioK = removecats(bio0(keepK));     % then subset by keepK (no chained indexing)
+bioK = removecats(bio0(keepK));     % then subset by keepK
 if numel(categories(kopK)) >= 2 && numel(categories(bioK)) >= 2
     p_ndvi_tw = anovan(ndviK, {kopK, bioK}, 'model','interaction', ...
         'varnames',{'Koppen','Biome'}, 'display','off');
@@ -88,15 +117,15 @@ else
 end
 
 %% ------------------ Print compact summaries ------------------
-fprintf('\n=== LUX_NDVI_per10k ~ Köppen (one-way; ORIGINAL) ===\n');      local_print(res_ndvi_koppen_all);
-fprintf('=== LUX_NDVI_per10k ~ Köppen (one-way; FILTERED n>=2) ===\n'); local_print(res_oneway_safe(res_ndvi_koppen_all, ndviK, kopK));
-fprintf('=== LUX_NDVI_per10k ~ Biome  (one-way) ===\n');                local_print(res_ndvi_biome);
+fprintf('\n=== %s ~ Köppen (one-way; ORIGINAL) ===\n', labelLuxN);      local_print(res_ndvi_koppen_all);
+fprintf('=== %s ~ Köppen (one-way; FILTERED n>=2) ===\n', labelLuxN); local_print(res_oneway_safe(res_ndvi_koppen_all, ndviK, kopK));
+fprintf('=== %s ~ Biome  (one-way) ===\n',                           labelLuxN); local_print(res_ndvi_biome);
 fprintf('NDVI slope two-way ANOVA (Köppen, Biome, Interaction): %s\n', mat2str(p_ndvi_tw,3));
 
-fprintf('\n=== LUX_LST_per10k ~ Köppen (one-way; ORIGINAL) ===\n');       local_print(res_lst_koppen_all);
-fprintf('=== LUX_LST_per10k ~ Köppen (one-way; FILTERED n>=2) ===\n');  local_print(res_oneway_safe(res_lst_koppen_all, lstK, kopKL));
-fprintf('=== LUX_LST_per10k ~ Biome  (one-way) ===\n');                 local_print(res_lst_biome);
-fprintf('LST slope two-way ANOVA (Köppen, Biome, Interaction): %s\n',   mat2str(p_lst_tw,3));
+fprintf('\n=== %s ~ Köppen (one-way; ORIGINAL) ===\n', labelLuxL);      local_print(res_lst_koppen_all);
+fprintf('=== %s ~ Köppen (one-way; FILTERED n>=2) ===\n', labelLuxL); local_print(res_oneway_safe(res_lst_koppen_all, lstK, kopKL));
+fprintf('=== %s ~ Biome  (one-way) ===\n',                           labelLuxL); local_print(res_lst_biome);
+fprintf('LST slope two-way ANOVA (Köppen, Biome, Interaction): %s\n',  mat2str(p_lst_tw,3));
 
 dropped = setdiff(cats, keepCats);
 if ~isempty(dropped)
@@ -109,21 +138,21 @@ Tukey_NDVI_Koppen = tukey_table(ndvi, kopAll);
 Tukey_LST_Biome   = tukey_table(lst,  bioAll);
 Tukey_LST_Koppen  = tukey_table(lst,  kopAll);
 
-fprintf('\n=== Tukey LUX_NDVI_per10k ~ Biome (significant pairs) ===\n');
+fprintf('\n=== Tukey %s ~ Biome (significant pairs) ===\n', labelLuxN);
 disp(Tukey_NDVI_Biome(Tukey_NDVI_Biome.pAdj<0.05, :))
-fprintf('\n=== Tukey LUX_NDVI_per10k ~ Köppen (significant pairs) ===\n');
+fprintf('\n=== Tukey %s ~ Köppen (significant pairs) ===\n', labelLuxN);
 disp(Tukey_NDVI_Koppen(Tukey_NDVI_Koppen.pAdj<0.05, :))
-fprintf('\n=== Tukey LUX_LST_per10k ~ Biome (significant pairs) ===\n');
+fprintf('\n=== Tukey %s ~ Biome (significant pairs) ===\n', labelLuxL);
 disp(Tukey_LST_Biome(Tukey_LST_Biome.pAdj<0.05, :))
-fprintf('\n=== Tukey LUX_LST_per10k ~ Köppen (significant pairs) ===\n');
+fprintf('\n=== Tukey %s ~ Köppen (significant pairs) ===\n', labelLuxL);
 disp(Tukey_LST_Koppen(Tukey_LST_Koppen.pAdj<0.05, :))
 
 % Optional: group means for context
 grpMean = @(y,g) groupsummary(table(y,g), 'g', 'mean','y');
-fprintf('\nGroup means (LUX_NDVI_per10k by Biome; singletons only for context):\n');   disp(grpMean(ndvi, bioAll))
-fprintf('\nGroup means (LUX_LST_per10k  by Biome; singletons only for context):\n');   disp(grpMean(lst,  bioAll))
-fprintf('\nGroup means (LUX_NDVI_per10k by Köppen; singletons only for context):\n');  disp(grpMean(ndvi, kopAll))
-fprintf('\nGroup means (LUX_LST_per10k  by Köppen; singletons only for context):\n');  disp(grpMean(lst,  kopAll))
+fprintf('\nGroup means (%s by Biome; singletons only for context):\n', labelLuxN); disp(grpMean(ndvi, bioAll))
+fprintf('\nGroup means (%s by Biome; singletons only for context):\n', labelLuxL); disp(grpMean(lst,  bioAll))
+fprintf('\nGroup means (%s by Köppen; singletons only for context):\n', labelLuxN); disp(grpMean(ndvi, kopAll))
+fprintf('\nGroup means (%s by Köppen; singletons only for context):\n', labelLuxL); disp(grpMean(lst,  kopAll))
 
 %% ===================== Local helpers =====================
 function out = res_oneway_safe(~, y, g)
@@ -144,7 +173,7 @@ function local_print(res)
     if isempty(a) || ~isfield(a,'p')
         fprintf('[no ANOVA result]\n');
     else
-        pA  = a.p;  if isempty(pA) || ~isfinite(pA), pAstr = 'NaN'; else, pAstr = sprintf('%.3g', pA); end
+        pA  = a.p;   if isempty(pA) || ~isfinite(pA), pAstr = 'NaN'; else, pAstr = sprintf('%.3g', pA); end
         e2  = a.eta2; if isempty(e2) || ~isfinite(e2), e2str = 'NaN'; else, e2str = sprintf('%.3f', e2); end
         fprintf('  one-way ANOVA: p = %s,  eta^2 = %s,  k=%d, n=%d\n', pAstr, e2str, a.k, a.n);
     end
@@ -203,7 +232,6 @@ function out = tukey_table(y, g, alpha)
     out = sortrows(out, {'pAdj','Diff'});
 end
 
-
 function names = local_names_from_stats(stats)
     names = strings(0,1);
     if isfield(stats,'gnames')
@@ -213,4 +241,3 @@ function names = local_names_from_stats(stats)
         end
     end
 end
-

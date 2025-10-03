@@ -1,7 +1,13 @@
 %% ===================== Script: Pairwise change (RAW income per $10k) =====================
 % Compares the income–outcome slope between all year pairs, city-by-city,
 % using RAW_INCOME_CPI scaled by $10,000 (per $10k).
+% Computes city-level trends (slope & p) for NDVI/LST luxury effects
+% and summarizes weakening/strengthening and median % weakening across each
+% city's observed span. Uses FDR (BH) per metric across cities.
+
 % Outputs a struct Pairwise.(metric) with dBeta_*, p_*, used_* columns per pair.
+% Requires (already in workspace): LUX_MEAN_T and/or LUX_MEDN_T
+% with columns: City, Year, LUX_NDVI_per10k, LUX_LST_per10k
 
 % ---------------------- USER SETTINGS ----------------------
 yearsUse          = [1990 2000 2010 2020 2023];
@@ -226,4 +232,184 @@ function mdl = stableFit(tbl, formula, useRobust)
     catch
         mdl = fitlm(tbl, formula);
     end
+end
+
+% City level luxury trends with FDR (BH)
+
+alpha = 0.05;         % target FDR level
+minYears = 3;         % require >=3 unique years per city
+baseYear = 2000;      % center for yearC
+useFDR  = true;
+
+haveMEAN = exist('LUX_MEAN_T','var')==1 && istable(LUX_MEAN_T);
+haveMEDN = exist('LUX_MEDN_T','var')==1 && istable(LUX_MEDN_T);
+if ~haveMEAN && ~haveMEDN
+    error('Need LUX_MEAN_T and/or LUX_MEDN_T in workspace.');
+end
+
+if haveMEAN
+    Trends_MEAN = local_analyze_one(LUX_MEAN_T,'MEAN',alpha,minYears,baseYear,useFDR);
+    assignin('base','Trends_MEAN',Trends_MEAN);
+end
+if haveMEDN
+    Trends_MEDN = local_analyze_one(LUX_MEDN_T,'MEDIAN',alpha,minYears,baseYear,useFDR);
+    assignin('base','Trends_MEDN',Trends_MEDN);
+end
+
+fprintf('\nDone. Placed in workspace: %s%s\n', ...
+    tern(haveMEAN,'Trends_MEAN ',''), tern(haveMEDN,'Trends_MEDN',''));
+
+%% ------- local helpers (functions below) -------
+
+function Trends = local_analyze_one(TT, label, alpha, minYears, baseYear, useFDR)
+    req = ["City","Year","LUX_NDVI_per10k","LUX_LST_per10k"];
+    v = string(TT.Properties.VariableNames);
+    missing = setdiff(req, v);
+    if ~isempty(missing)
+        error('%s is missing columns: %s', label, strjoin(missing,', '));
+    end
+
+    TT = TT(:, req);               % keep only what we need
+    TT.City = string(TT.City);     % tidy types
+    TT.Year = double(TT.Year);
+
+    metrics = struct('col',{'LUX_NDVI_per10k','LUX_LST_per10k'}, ...
+                     'name',{'NDVI','LST'});
+
+    rows = [];
+
+    for m = 1:numel(metrics)
+        ycol  = metrics(m).col;
+        mname = metrics(m).name;
+
+        cities = unique(TT.City,'stable');
+        for i = 1:numel(cities)
+            Ci  = cities(i);
+            S   = TT(TT.City==Ci & isfinite(TT.(ycol)) & isfinite(TT.Year), :);
+            if height(S) < minYears || numel(unique(S.Year)) < minYears
+                continue
+            end
+
+            S.yearC = S.Year - baseYear;
+            mdl = fitlm(S, sprintf('%s ~ yearC', ycol), 'Intercept', true);
+            if ~ismember('yearC', string(mdl.Coefficients.Properties.RowNames))
+                continue
+            end
+
+            slope   = mdl.Coefficients{'yearC','Estimate'};
+            seSlope = mdl.Coefficients{'yearC','SE'};
+            pSlope  = mdl.Coefficients{'yearC','pValue'};
+            r2      = mdl.Rsquared.Ordinary;
+
+            % weakening/strengthening direction:
+            % NDVI: slope < 0 = weaker association (toward 0)
+            % LST : slopes usually negative; slope > 0 = weaker (toward 0)
+            if mname=="NDVI"
+                weaken_dir = slope < 0;
+                strengthen_dir = slope > 0;
+            else
+                weaken_dir = slope > 0;
+                strengthen_dir = slope < 0;
+            end
+
+            % Percent weakening across observed span (model-predicted magnitude move toward 0)
+            yrMin = min(S.Year); yrMax = max(S.Year);
+            yhatMin = predict(mdl, table(yrMin - baseYear, 'VariableNames',{'yearC'}));
+            yhatMax = predict(mdl, table(yrMax - baseYear, 'VariableNames',{'yearC'}));
+            denom = max(abs(yhatMin), 1e-8);
+            pctWeak = 1 - (abs(yhatMax)/denom);   % >0 means moved toward zero
+
+            rows = [rows; struct( ...
+                'Table', string(label), ...
+                'Metric', string(mname), ...
+                'City', Ci, ...
+                'nYears', numel(unique(S.Year)), ...
+                'YearMin', yrMin, ...
+                'YearMax', yrMax, ...
+                'Slope_perYear', slope, ...
+                'SE', seSlope, ...
+                'pSlope', pSlope, ...
+                'Weaken_dir', weaken_dir, ...
+                'Strengthen_dir', strengthen_dir, ...
+                'PctWeakeningSpan', double(pctWeak), ...
+                'R2', r2 )]; %#ok<AGROW>
+        end
+    end
+
+    Trends = struct2table(rows);
+
+    % FDR within each metric
+    if useFDR && ~isempty(Trends)
+        Trends.pSlope_FDR = NaN(height(Trends),1);
+        for mname = ["NDVI","LST"]
+            k = Trends.Metric==mname & isfinite(Trends.pSlope);
+            if any(k)
+                p = Trends.pSlope(k);
+                [~,~,pFDR] = local_fdr_bh(p, alpha);
+                Trends.pSlope_FDR(k) = pFDR;
+            end
+        end
+    else
+        Trends.pSlope_FDR = Trends.pSlope;
+    end
+
+    Trends.Weaken_sig     = Trends.Weaken_dir     & (Trends.pSlope_FDR < alpha);
+    Trends.Strengthen_sig = Trends.Strengthen_dir & (Trends.pSlope_FDR < alpha);
+
+    % Print summary
+    for mname = ["NDVI","LST"]
+        K = Trends.Metric==mname;
+        if ~any(K), continue; end
+        nC = nnz(K);
+        pctWeak_dir = 100*mean(Trends.Weaken_dir(K),'omitnan');
+        pctWeak_sig = 100*mean(Trends.Weaken_sig(K),'omitnan');
+        nStrong_sig = nnz(Trends.Strengthen_sig(K));
+
+        medW = median(Trends.PctWeakeningSpan(K),'omitnan')*100;
+        q25  = quantile(Trends.PctWeakeningSpan(K),0.25); 
+        q75  = quantile(Trends.PctWeakeningSpan(K),0.75);
+
+        fprintf('\n[%s – %s]\n', label, mname);
+        fprintf(' Cities analyzed: %d (>= %d years)\n', nC, minYears);
+        fprintf(' Weakened (direction only): %.1f%%%%\n', pctWeak_dir);
+        fprintf(' Weakened & significant (BH-FDR @ alpha=%.2f): %.1f%%%%\n', alpha, pctWeak_sig);
+        if nStrong_sig==0
+            fprintf(' Significant strengthening (BH-FDR): none\n');
+        else
+            fprintf(' Significant strengthening (BH-FDR): %d cities\n', nStrong_sig);
+        end
+        fprintf(' Median %% weakening over observed span: %.1f%%%%  (IQR %.1f–%.1f%%%%)\n', ...
+            medW, q25*100, q75*100);
+    end
+end
+
+function [h, crit_p, adj_p] = local_fdr_bh(pvals, q)
+% Benjamini-Hochberg FDR (positive dependence) for a vector of p-values.
+    if nargin<2, q = 0.05; end
+    p = pvals(:);
+    [ps, idx] = sort(p);
+    m = numel(p);
+    thresh = (1:m)' * (q/m);
+    rej = ps <= thresh;
+    if any(rej)
+        kmax = find(rej,1,'last');
+        crit_p = thresh(kmax);
+        hvec = p <= crit_p;
+    else
+        crit_p = 0;
+        hvec = false(size(p));
+    end
+    % adjusted p-values
+    adj = zeros(size(ps));
+    adj(end) = ps(end);
+    for i = m-1:-1:1
+        adj(i) = min((m/i)*ps(i), adj(i+1));
+    end
+    adj_p = zeros(size(p)); adj_p(idx) = adj;
+    h = hvec;
+end
+
+function out = tern(cond, a, b)
+% tiny helper for printing
+    if cond, out = a; else, out = b; end
 end

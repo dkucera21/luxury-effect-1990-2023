@@ -119,7 +119,7 @@ for i = 1:height(TopN)
     % annotate Δ and balance
     d = TopN.Delta_TopMinusBottom(i);
     xpad = 0.04*range([TopN.Slope_Bottom;TopN.Slope_Top]);
-    text(axD, max(b,t)+xpad, y2(i), sprintf('\\Delta = %+0.4f', bal), ...
+	text(axD, max(b,t)+xpad, y2(i), sprintf('\\Delta = %+0.4f', d), ...
         'FontSize', 10, 'Color', [0.25 0.25 0.25], 'VerticalAlignment','middle');
 end
 set(axD,'YTick',y2,'YTickLabel',TopN.City,'YDir','reverse','TickDir','out');

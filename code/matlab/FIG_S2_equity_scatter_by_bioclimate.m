@@ -1,10 +1,10 @@
 %% figureS1_typology_scatter.m
 % ------------------------------------------------------------------------------
-% SI Figure S1: Typology scatter — NDVI balance vs ΔLST, colored by Biome/Köppen
+% SI Figure S1: Typology scatter — ΔNDVI (equity change) vs ΔLST, colored by Biome/Köppen
 %
 % Inputs (preferred, from equity_build_and_analyze.m):
-%   T_NDVI : table with City, Slope_Bottom, Slope_Top, ...
-%   T_LST  : table with City, Slope_Bottom, Slope_Top, Delta_TopMinusBottom, ...
+%   T_NDVI : table with City, Slope_Bottom, Slope_Top, (optionally) Delta_TopMinusBottom
+%   T_LST  : table with City, Slope_Bottom, Slope_Top, Delta_TopMinusBottom
 %   A_HYPO_MEANS : table with City and a typology column (BIOMES_cat or KOPPEN_cat)
 % If T_NDVI/T_LST are not in the workspace, the script will try to load
 % them from equity_panel.mat.
@@ -16,14 +16,14 @@ alphaFace      = 0.85;    % face alpha
 alphaEdge      = 0.25;    % edge alpha
 labelExtremesN = 3;       % how many extremes to auto-label on each axis
 
-% --- NEW: output toggles ---
+% --- output toggles ---
 WritePNG = false;          % <- set false to skip PNG
 WritePDF = false;          % <- set false to skip PDF
-pngOut   = 'SI_typology_scatter_balance_vs_DeltaLST.png';
-pdfOut   = 'SI_typology_scatter_balance_vs_DeltaLST.pdf';
+pngOut   = 'SI_typology_scatter_DeltaNDVI_vs_DeltaLST.png';
+pdfOut   = 'SI_typology_scatter_DeltaNDVI_vs_DeltaLST.pdf';
 
-% --- NEW: typology toggle: 'BIOME' or 'KOPPEN' ---
-TypologyMode = 'KOPPEN';   % options: 'BIOME' (BIOMES_cat) | 'KOPPEN' (KOPPEN_cat)
+% --- typology toggle: 'BIOME' or 'KOPPEN' ---
+TypologyMode = 'BIOME';   % options: 'BIOME' (BIOMES_cat) | 'KOPPEN' (KOPPEN_cat)
 %% ======================================================
 
 % ---- Pull LME per-city slopes (preferred) ----
@@ -54,13 +54,13 @@ ixTyp = find(v == wantCol, 1);
 assert(~isempty(ixTyp), errMsg);
 
 % ---- column guards on LME tables ----
-needN = {'City','Slope_Bottom','Slope_Top'};
-needL = {'City','Slope_Bottom','Slope_Top','Delta_TopMinusBottom'};
-assert(all(ismember(needN, T_NDVI.Properties.VariableNames)), 'T_NDVI missing required columns.');
-assert(all(ismember(needL, T_LST.Properties.VariableNames)),  'T_LST missing required columns.');
+needN_base = {'City','Slope_Bottom','Slope_Top'};
+needL      = {'City','Slope_Bottom','Slope_Top','Delta_TopMinusBottom'};
+assert(all(ismember(needN_base, T_NDVI.Properties.VariableNames)), 'T_NDVI missing required columns (City, slopes).');
+assert(all(ismember(needL,      T_LST .Properties.VariableNames)), 'T_LST missing required columns.');
 
 % ---- compute features on copies (don’t mutate originals) ----
-tN = T_NDVI(:, {'City','Slope_Bottom','Slope_Top'});
+tN = T_NDVI(:, needN_base);
 tL = T_LST (  :, {'City','Slope_Bottom','Slope_Top','Delta_TopMinusBottom'});
 
 % Ensure robust string joins
@@ -72,10 +72,15 @@ meta = A_HYPO_MEANS(:, ["City", wantCol]);
 meta.Properties.VariableNames = {'City','Typology'};
 meta.City = string(meta.City);
 
-% NDVI balance (positive => bottom dominates absolute NDVI change)
-tN.NDVI_Balance = abs(tN.Slope_Bottom) - abs(tN.Slope_Top);
+% ---- X-axis: ΔNDVI (Top − Bottom) per decade ----
+% Prefer precomputed Delta_TopMinusBottom if present; otherwise compute from slopes
+if ismember('Delta_TopMinusBottom', T_NDVI.Properties.VariableNames)
+    tN.DeltaNDVI = T_NDVI.Delta_TopMinusBottom;
+else
+    tN.DeltaNDVI = tN.Slope_Top - tN.Slope_Bottom;
+end
 
-% ΔLST from LME (Top − Bottom), consistent with CityEquity.LME_DeltaSlope_LST
+% ---- Y-axis: ΔLST (Top − Bottom) per decade (from LME table) ----
 tL.DeltaLST = tL.Delta_TopMinusBottom;
 
 % Merge NDVI + LST + typology
@@ -83,7 +88,7 @@ JL = innerjoin(innerjoin(tN, tL, 'Keys','City'), meta, 'Keys','City');
 
 % Filter valid rows and well-defined typologies
 grp = categorical(string(JL.Typology));
-ok  = isfinite(JL.NDVI_Balance) & isfinite(JL.DeltaLST) & ~isundefined(grp);
+ok  = isfinite(JL.DeltaNDVI) & isfinite(JL.DeltaLST) & ~isundefined(grp);
 JL  = JL(ok,:);
 grp = removecats(categorical(string(JL.Typology)));
 
@@ -104,18 +109,17 @@ figure('Color','w','Position',[100 100 900 650]); hold on; box on; grid on;
 % scatter by typology
 for k = 1:K
     idx = grp == cats{k};
-    scatter(JL.NDVI_Balance(idx), JL.DeltaLST(idx), pointSize, ...
+    scatter(JL.DeltaNDVI(idx), JL.DeltaLST(idx), pointSize, ...
         'MarkerFaceColor', Cmap(cats{k}), 'MarkerEdgeColor','k', ...
         'MarkerFaceAlpha', alphaFace, 'MarkerEdgeAlpha', alphaEdge);
 end
 
 % reference lines at zero
-xl = xlim; yl = ylim; %#ok<NASGU>
 plot([0 0], ylim, 'k:','LineWidth',1);
 plot(xlim, [0 0], 'k:','LineWidth',1);
 
 % labels, legend, title
-xlabel('|slope_{bottom}| − |slope_{top}|  (NDVI per decade)');
+xlabel('\DeltaNDVI = slope_{Top} − slope_{Bottom}  (per decade)');  % more negative = equity gain
 ylabel('\DeltaLST = slope_{Top} − slope_{Bottom}  (°C per decade)');
 title(sprintf('Typology of equity pathways by %s', ...
     ternary(strcmpi(TypologyMode,'KOPPEN'),'Köppen','biome')));
@@ -134,20 +138,20 @@ catch
     end
 end
 
-% quadrant annotations
+% quadrant annotations (reworded for ΔNDVI rather than balance)
 xl = xlim; yl = ylim;
 dx = 0.03*(xl(2)-xl(1)); dy = 0.04*(yl(2)-yl(1));
 text(xl(2)-dx, yl(2)-dy, 'Top-tail warming \uparrow', 'HorizontalAlignment','right','Color',[0.25 0.25 0.25]);
 text(xl(2)-dx, yl(1)+dy, 'Bottom warms faster \downarrow', 'HorizontalAlignment','right','Color',[0.25 0.25 0.25]);
-text(xl(2)-dx, yl(2)-3*dy, 'Level up \rightarrow (bottom dominates NDVI)', 'HorizontalAlignment','right','Color',[0.1 0.35 0.9]);
-text(xl(1)+dx, yl(2)-3*dy, '\leftarrow Level down (top loss dominates NDVI)', 'HorizontalAlignment','left','Color',[0.85 0.2 0.2]);
+text(xl(1)+dx, yl(2)-3*dy, '\leftarrow NDVI equity gain (gap closes)', 'HorizontalAlignment','left','Color',[0.1 0.35 0.9]);
+text(xl(2)-dx, yl(2)-3*dy, 'NDVI equity loss (gap widens) \rightarrow', 'HorizontalAlignment','right','Color',[0.85 0.2 0.2]);
 
 % optional: label a few extremes for readability
-[~,ix_hi] = maxk(abs(JL.NDVI_Balance), labelExtremesN);
-[~,iy_hi] = maxk(abs(JL.DeltaLST),    labelExtremesN);
+[~,ix_hi] = maxk(abs(JL.DeltaNDVI), labelExtremesN);
+[~,iy_hi] = maxk(abs(JL.DeltaLST),  labelExtremesN);
 labIdx = unique([ix_hi; iy_hi]);
 for ii = labIdx(:)'
-    text(JL.NDVI_Balance(ii), JL.DeltaLST(ii), " " + string(JL.City(ii)), ...
+    text(JL.DeltaNDVI(ii), JL.DeltaLST(ii), " " + string(JL.City(ii)), ...
         'FontSize',8, 'Color',[0.2 0.2 0.2], 'HorizontalAlignment','left', ...
         'VerticalAlignment','middle');
 end

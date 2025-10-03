@@ -1,4 +1,4 @@
-%% equity_by_climate_from_CityEquity.m  (fixed)
+%% equity_by_climate_from_CityEquity.m  (updated to report NDVI Balance)
 % Tests whether equity changes differ by climate (Biome / Köppen)
 % Requires: CityEquity (table) and A_HYPO_MEANS (table with BIOMES_cat / KOPPEN_cat)
 
@@ -24,22 +24,32 @@ if any(lower(keep)=="koppen_cat"), Meta.KOPPEN_cat = categorical(string(Meta.KOP
 J = innerjoin(CityEquity, Meta, 'Keys','City');
 
 %% ---------- Outcomes (match typology figure) ----------
+% ΔLST (Bottom–Top; positive = equity closing for LST)
 if ismember('LME_DeltaSlope_LST', J.Properties.VariableNames)
     J.DeltaLST = J.LME_DeltaSlope_LST;
 else
     J.DeltaLST = J.Slope_BotLST - J.Slope_TopLST;
 end
+
+% NDVI Balance Index: + means "bottom-up" (bottom improving more in magnitude)
+% If precomputed as B_NDVI, use that; otherwise derive from per-tail slopes.
 if ismember('B_NDVI', J.Properties.VariableNames)
     J.NDVI_Balance = J.B_NDVI;
 else
-    J.NDVI_Balance = abs(J.Slope_BotNDVI) - abs(J.Slope_TopNDVI);
-end
-if ismember('LME_DeltaSlope_NDVI', J.Properties.VariableNames)
-    J.DeltaNDVI = J.LME_DeltaSlope_NDVI;
+    % robust to missing columns; set to NaN if not present
+    if all(ismember({'Slope_BotNDVI','Slope_TopNDVI'}, J.Properties.VariableNames))
+        J.NDVI_Balance = abs(J.Slope_BotNDVI) - abs(J.Slope_TopNDVI);
+    else
+        J.NDVI_Balance = NaN(height(J),1);
+    end
 end
 
-ok = isfinite(J.DeltaLST) & isfinite(J.NDVI_Balance);
-J  = J(ok,:);
+% ΔNDVI (Top–Bottom; negative = equity closing for NDVI)
+if ismember('LME_DeltaSlope_NDVI', J.Properties.VariableNames)
+    J.DeltaNDVI = J.LME_DeltaSlope_NDVI;
+elseif all(ismember({'Slope_TopNDVI','Slope_BotNDVI'}, J.Properties.VariableNames))
+    J.DeltaNDVI = J.Slope_TopNDVI - J.Slope_BotNDVI;
+end
 
 %% ---------- Helper: one-way tests with singleton drop ----------
 function OUT = run_oneway(tbl, yname, gname)
@@ -48,15 +58,16 @@ function OUT = run_oneway(tbl, yname, gname)
     g = tbl.(gname);
     if ~iscategorical(g), g = categorical(string(g)); end
 
-    % --- drop singleton groups (e.g., your single Köppen class)
+    % --- drop non-finite y, then singleton groups
+    ok = isfinite(y) & ~ismissing(g);
+    y = y(ok); g = g(ok);
     [cats,~,ic] = unique(g,'stable');
     Nper = accumarray(ic,1);
     keepCats = cats(Nper >= 2);
     rows = ismember(g, keepCats);
-    y = y(rows);
-    g = removecats(g(rows));
+    y = y(rows); g = removecats(g(rows));
 
-    % --- scalar struct; wrap array fields in a cell
+    % --- scaffold
     OUT = struct('yname', yname, ...
                  'gname', gname, ...
                  'levels', { {categories(g)} }, ...
@@ -70,10 +81,9 @@ function OUT = run_oneway(tbl, yname, gname)
         return
     end
 
-    % --- ANOVA (η² via anovan for robust SS), fallback to anova1
+    % --- ANOVA (η² via anovan), fallback to anova1
     try
         [pA, AT] = anovan(y, {g}, 'display','off');   % one factor
-        % AT rows: {Source, SS, df, MS, F, Prob>F}
         SSg = AT{2,2};  SSe = AT{3,2};
         OUT.eta2    = SSg / (SSg + SSe);
         OUT.p_anova = pA;
@@ -85,16 +95,14 @@ function OUT = run_oneway(tbl, yname, gname)
     % --- Kruskal–Wallis
     OUT.p_kw = kruskalwallis(y, g, 'off');
 
-    % --- Group stats (mean, std, N, SEM) via splitapply (no groupsummary)
+    % --- Group stats
     [G, levs] = findgroups(g);
     N  = splitapply(@numel, y, G);
     MU = splitapply(@(x) mean(x,'omitnan'), y, G);
     SD = splitapply(@(x)  std(x,'omitnan'), y, G);
     SEM = SD ./ sqrt(N);
-
-    GT = table(levs, N, MU, SD, SEM, ...
+    OUT.groups = table(levs, N, MU, SD, SEM, ...
         'VariableNames', {'Group','N','Mean','Std','SEM'});
-    OUT.groups = GT;
 
     % --- Tukey HSD if ANOVA significant
     if isfinite(OUT.p_anova) && OUT.p_anova < 0.05
@@ -108,39 +116,61 @@ function OUT = run_oneway(tbl, yname, gname)
             T.g2 = categorical(L(T.g2));
             OUT.tukey = T;
         catch
-            % ignore Tukey errors silently
         end
     end
 end
 
-
+function print_block(titleStr, OUT)
+    fprintf('\n=== %s ===\n', titleStr);
+    if ~isempty(OUT.groups) && height(OUT.groups)>0
+        disp(OUT.groups);
+    else
+        fprintf('(No groups to compare — after filtering, <2 levels or <3 rows)\n');
+    end
+    if ~isnan(OUT.p_anova)
+        fprintf('ANOVA p = %.4g, η² = %.3f | KW p = %.4g\n', OUT.p_anova, OUT.eta2, OUT.p_kw);
+    else
+        fprintf('KW p = %.4g (ANOVA unavailable)\n', OUT.p_kw);
+    end
+    if ~isempty(OUT.tukey) && height(OUT.tukey)>0
+        try
+            nSig = sum(OUT.tukey.pAdj < 0.05);
+            fprintf('Tukey (α=0.05): %d significant pair(s).\n', nSig);
+        catch
+        end
+    end
+end
 
 %% ---------- Run tests ----------
 Results = struct();
 
 if ismember('BIOMES_cat', J.Properties.VariableNames)
-    fprintf('\n=== Tests by BIOME (singletons removed) ===\n');
+    Results.BIOME = struct();
     Results.BIOME.DeltaLST      = run_oneway(J, 'DeltaLST',     'BIOMES_cat');
     Results.BIOME.NDVI_Balance  = run_oneway(J, 'NDVI_Balance', 'BIOMES_cat');
     if ismember('DeltaNDVI', J.Properties.VariableNames)
         Results.BIOME.DeltaNDVI = run_oneway(J, 'DeltaNDVI', 'BIOMES_cat');
     end
-    disp(Results.BIOME.DeltaLST.groups);
-    fprintf('ANOVA p (ΔLST~Biome)=%.4g, η²=%.3f | KW p=%.4g\n', ...
-        Results.BIOME.DeltaLST.p_anova, Results.BIOME.DeltaLST.eta2, Results.BIOME.DeltaLST.p_kw);
+    print_block('Tests by BIOME (ΔLST)',        Results.BIOME.DeltaLST);
+    print_block('Tests by BIOME (NDVI Balance)',Results.BIOME.NDVI_Balance);
+    if isfield(Results.BIOME,'DeltaNDVI')
+        print_block('Tests by BIOME (ΔNDVI)',   Results.BIOME.DeltaNDVI);
+    end
 end
 
 if ismember('KOPPEN_cat', J.Properties.VariableNames)
-    fprintf('\n=== Tests by KÖPPEN (singletons removed) ===\n');
+    Results.KOPPEN = struct();
     Results.KOPPEN.DeltaLST      = run_oneway(J, 'DeltaLST',     'KOPPEN_cat');
     Results.KOPPEN.NDVI_Balance  = run_oneway(J, 'NDVI_Balance', 'KOPPEN_cat');
     if ismember('DeltaNDVI', J.Properties.VariableNames)
         Results.KOPPEN.DeltaNDVI = run_oneway(J, 'DeltaNDVI', 'KOPPEN_cat');
     end
-    disp(Results.KOPPEN.DeltaLST.groups);
-    fprintf('ANOVA p (ΔLST~Köppen)=%.4g, η²=%.3f | KW p=%.4g\n', ...
-        Results.KOPPEN.DeltaLST.p_anova, Results.KOPPEN.DeltaLST.eta2, Results.KOPPEN.DeltaLST.p_kw);
+    print_block('Tests by KÖPPEN (ΔLST)',        Results.KOPPEN.DeltaLST);
+    print_block('Tests by KÖPPEN (NDVI Balance)',Results.KOPPEN.NDVI_Balance);
+    if isfield(Results.KOPPEN,'DeltaNDVI')
+        print_block('Tests by KÖPPEN (ΔNDVI)',   Results.KOPPEN.DeltaNDVI);
+    end
 end
 
 assignin('base','EquityClimateResults', Results);
-fprintf('\nSaved -> EquityClimateResults (group means, ANOVA/KW, Tukey for significant ANOVAs).\n');
+fprintf('\nSaved -> EquityClimateResults (group means, ANOVA/KW, Tukey if ANOVA sig.).\n');

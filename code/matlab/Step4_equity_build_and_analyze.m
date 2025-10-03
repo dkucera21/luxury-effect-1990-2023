@@ -97,7 +97,6 @@ for i = 1:height(ValidCY)
     nb = max(MinPerTail, floor(TailPct*n));
     nt = max(MinPerTail, floor(TailPct*n));
     if nb + nt > n
-        % shrink proportionally but never below MinPerTail per tail
         nb = max(MinPerTail, floor((TailPct/2)*n));
         nt = max(MinPerTail, floor((TailPct/2)*n));
         if nb + nt > n, continue; end
@@ -127,8 +126,6 @@ fprintf('Tail = %.0f%%%% | Years = [%s] | MinPerTail = %d | MinTractsCity = %d |
     100*TailPct, num2str(YearsUse), MinPerTail, MinTractsCity);
 fprintf('Panel rows kept: %d  | Cities represented: %d\n', height(Panel), numel(categories(Panel.City)));
 
-
-
 %% ===================== 2) LONG TABLES & STACKED LMEs =====================
 % Long NDVI
 Tlong_NDVI = table();
@@ -136,8 +133,7 @@ Tlong_NDVI.City     = [Panel.City; Panel.City];
 Tlong_NDVI.Year     = [Panel.Year; Panel.Year];
 Tlong_NDVI.time_dec = [Panel.time_dec; Panel.time_dec];
 Tlong_NDVI.tail     = categorical( ...
-    [repmat("Bottom",height(Panel),1); repmat("Top",height(Panel),1)], ...
-    ["Bottom","Top"]);                               % << reference = Bottom
+    [repfun("Bottom",height(Panel)); repfun("Top",height(Panel))], ["Bottom","Top"]);
 Tlong_NDVI.y        = [Panel.Bot_NDVI; Panel.Top_NDVI];
 
 % Long LST
@@ -146,10 +142,8 @@ Tlong_LST.City     = [Panel.City; Panel.City];
 Tlong_LST.Year     = [Panel.Year; Panel.Year];
 Tlong_LST.time_dec = [Panel.time_dec; Panel.time_dec];
 Tlong_LST.tail     = categorical( ...
-    [repmat("Bottom",height(Panel),1); repmat("Top",height(Panel),1)], ...
-    ["Bottom","Top"]);                               % << reference = Bottom
+    [repfun("Bottom",height(Panel)); repfun("Top",height(Panel))], ["Bottom","Top"]);
 Tlong_LST.y        = [Panel.Bot_LST; Panel.Top_LST];
-
 
 % --- CRITICAL: random slopes for time_dec and time_dec:tail ---
 formTail = 'y ~ 1 + time_dec*tail + (1 + time_dec + time_dec:tail | City)';
@@ -170,8 +164,7 @@ catch ME
     lmeL = fitlme(Tlong_LST,  'y ~ 1 + time_dec*tail + (1 + time_dec | City)', 'FitMethod','REML');
 end
 
-
-% OLS slopes on the panel (Top/Bottom)
+% OLS slopes on the panel (Top/Bottom) — used for identity checks only
 b_top_ndvi = fitlm(Panel,'Top_NDVI ~ time_dec').Coefficients{'time_dec','Estimate'};
 b_bot_ndvi = fitlm(Panel,'Bot_NDVI ~ time_dec').Coefficients{'time_dec','Estimate'};
 b_top_lst  = fitlm(Panel,'Top_LST  ~ time_dec').Coefficients{'time_dec','Estimate'};
@@ -181,48 +174,26 @@ b_bot_lst  = fitlm(Panel,'Bot_LST  ~ time_dec').Coefficients{'time_dec','Estimat
 lmN = fitlm(Tlong_NDVI, 'y ~ 1 + time_dec*tail');
 lmL = fitlm(Tlong_LST,  'y ~ 1 + time_dec*tail');
 
-% --- replace the getIntLM + b_int_* lines with this ---
-
-% grab term names safely (works across MATLAB versions)
-cnN = string(lmN.CoefficientNames);
-cnL = string(lmL.CoefficientNames);
-
-% interaction index is the term that involves both time_dec and tail
+% Locate interaction terms
+cnN = string(lmN.CoefficientNames); cnL = string(lmL.CoefficientNames);
 iN = find(contains(cnN,"time_dec") & contains(cnN,"tail"), 1);
 iL = find(contains(cnL,"time_dec") & contains(cnL,"tail"), 1);
-
-% fallback via row names if needed (older versions)
-if isempty(iN)
-    rnN = string(lmN.Coefficients.Properties.RowNames);
-    iN  = find(contains(rnN,"time_dec") & contains(rnN,"tail"), 1);
-end
-if isempty(iL)
-    rnL = string(lmL.Coefficients.Properties.RowNames);
-    iL  = find(contains(rnL,"time_dec") & contains(rnL,"tail"), 1);
-end
+if isempty(iN), rnN = string(lmN.Coefficients.Properties.RowNames); iN = find(contains(rnN,"time_dec") & contains(rnN,"tail"), 1); end
+if isempty(iL), rnL = string(lmL.Coefficients.Properties.RowNames); iL = find(contains(rnL,"time_dec") & contains(rnL,"tail"), 1); end
 
 if isempty(iN) || isempty(iL)
     warning('Could not locate the time_dec:tail interaction term in OLS models.');
-    b_int_ndvi = NaN;
-    b_int_lst  = NaN;
+    b_int_ndvi = NaN; b_int_lst = NaN;
 else
     b_int_ndvi = lmN.Coefficients.Estimate(iN);
     b_int_lst  = lmL.Coefficients.Estimate(iL);
 end
 
-
-tol = 1e-8;   % tighter, but realistic for OLS-vs-OLS equivalence
-
+tol = 1e-8;
 dn = abs(b_int_ndvi - (b_top_ndvi - b_bot_ndvi));
 dl = abs(b_int_lst  - (b_top_lst  - b_bot_lst ));
-
-if dn > tol
-    warning('NDVI interaction identity off by %.3g (likely due to NA patterns or coding).', dn);
-end
-if dl > tol
-    warning('LST interaction identity off by %.3g (likely due to NA patterns or coding).', dl);
-end
-
+if dn > tol, warning('NDVI interaction identity off by %.3g (likely NA patterns or coding).', dn); end
+if dl > tol, warning('LST interaction identity off by %.3g (likely NA patterns or coding).',  dl); end
 
 %% ===================== 3) SEPARATE LMEs: Gap, Top, Bottom =====================
 form_gap_ndvi = 'Gap_NDVI ~ time_dec + (1|City)';
@@ -244,8 +215,8 @@ lme_top_lst  = fitlme(Panel2, form_top_lst);
 lme_bot_lst  = fitlme(Panel2, form_bot_lst);
 
 fprintf('\n=== Tail panel built ===\n');
-fprintf('Tail = %.0f%% | Years = [%s] | MinTracts = %d | OverlapField = %s\n', ...
-    100*TailPct, num2str(YearsUse), MinTracts, OverlapField);
+fprintf('Tail = %.0f%% | Years = [%s] | MinTractsCity = %d | OverlapField = %s\n', ...
+    100*TailPct, num2str(YearsUse), MinTractsCity, OverlapField);
 fprintf('Panel rows: %d  | Cities: %d\n', height(Panel), numel(categories(Panel.City)));
 fprintf('\nFE interactions (per decade): NDVI %+0.4f | LST %+0.4f\n\n', b_int_ndvi, b_int_lst);
 
@@ -299,13 +270,14 @@ fprintf('Label summary (%%):\n');
 disp(LabelCounts(:,{'Label','N','Pct'}));
 
 %% ===================== 5) PER-CITY EQUITY CHANGES & CSV =====================
-% Always compute OLS per-city slopes over the panel
-CityEquity = table('Size',[numel(CityIDs) 13],'VariableTypes', ...
-    ["string","double","double","double","double","double","double","double","double","double","double","double","double"], ...
+% OLS per-city slopes over the Panel (authoritative for printing)
+CityEquity = table('Size',[numel(CityIDs) 15],'VariableTypes', ...
+    ["string","double","double","double","double","double","double","double","double","double","double","double","double","double","string"], ...
     'VariableNames', {'City','nYears','YearMin','YearMax', ...
         'Slope_TopNDVI','Slope_BotNDVI','Slope_GapNDVI', ...
         'Slope_TopLST','Slope_BotLST','Slope_GapLST', ...
-        'Delta_GapNDVI','Delta_GapLST','Span_Decades'});
+        'Delta_GapNDVI','Delta_GapLST','Span_Decades', ...
+        'NDVI_Balance','NDVI_Mechanism'});
 
 for k = 1:numel(CityIDs)
     Ci = CityIDs(k); P = sortrows(Panel(Panel.City==categorical(Ci), :), 'Year');
@@ -316,49 +288,88 @@ for k = 1:numel(CityIDs)
     sTopL = local_city_slope(P, 'Top_LST');
     sBotL = local_city_slope(P, 'Bot_LST');
 
-    sGapN = sTopN - sBotN;        % NDVI inequity slope (Top–Bottom)
-    sGapL = sBotL - sTopL;        % LST inequity slope (Bottom–Top)
+    sGapN = sTopN - sBotN;            % NDVI inequity slope (Top–Bottom)
+    sGapL = sBotL - sTopL;            % LST inequity slope (Bottom–Top)
 
-    dGapN = sGapN * spanDec;      % implied gap change across the city’s span
+    dGapN = sGapN * spanDec;          % implied gap change across the city’s span
     dGapL = sGapL * spanDec;
 
-    CityEquity(k,:) = {Ci, nY, yMin, yMax, sTopN, sBotN, sGapN, sTopL, sBotL, sGapL, dGapN, dGapL, spanDec};
+    % NDVI balance & mechanism
+    bNDVI = abs(sBotN) - abs(sTopN);  % (+) uplift ; (−) erosion
+    BalanceDeadzone = 1e-3;
+    if bNDVI >  BalanceDeadzone
+        mech = "uplift (bottom-tail greening)";
+    elseif bNDVI < -BalanceDeadzone
+        mech = "erosion (top-tail decline)";
+    else
+        mech = "both";
+    end
+
+    CityEquity(k,:) = {Ci, nY, yMin, yMax, ...
+        sTopN, sBotN, sGapN, ...
+        sTopL, sBotL, sGapL, ...
+        dGapN, dGapL, spanDec, ...
+        bNDVI, mech};
 end
 
-% Try to add LME-based random-effect deltas (city-specific)
+% LME-based random-effect deltas (city-specific; saved for CIs)
 T_NDVI = try_city_slopes_RE(lmeN);
 T_LST  = try_city_slopes_RE(lmeL);
 
+% ----- Join NDVI LME deltas -----
 if ~isempty(T_NDVI)
-    CityEquity = outerjoin(CityEquity, T_NDVI(:,{'City','Delta_TopMinusBottom','Delta_CI_L','Delta_CI_U'}), ...
+    CityEquity = outerjoin( ...
+        CityEquity, ...
+        T_NDVI(:,{'City','Delta_TopMinusBottom','Delta_CI_L','Delta_CI_U'}), ...
         'Keys','City','MergeKeys',true,'Type','left');
-    CityEquity.Properties.VariableNames(end-2:end) = ...
-        {'LME_DeltaSlope_NDVI','LME_Delta_CI_L_NDVI','LME_Delta_CI_U_NDVI'};
+
+    vn = CityEquity.Properties.VariableNames;
+    if ismember('Delta_TopMinusBottom', vn)
+        CityEquity.Properties.VariableNames{strcmp(vn,'Delta_TopMinusBottom')} = 'LME_DeltaSlope_NDVI';
+    end
+    vn = CityEquity.Properties.VariableNames;
+    if ismember('Delta_CI_L', vn)
+        CityEquity.Properties.VariableNames{strcmp(vn,'Delta_CI_L')} = 'LME_CI_L_NDVI';
+    end
+    vn = CityEquity.Properties.VariableNames;
+    if ismember('Delta_CI_U', vn)
+        CityEquity.Properties.VariableNames{strcmp(vn,'Delta_CI_U')} = 'LME_CI_U_NDVI';
+    end
 else
-    % deterministic fallback from OLS slopes (ensures non-constant deltas)
-    CityEquity.LME_DeltaSlope_NDVI   = CityEquity.Slope_TopNDVI - CityEquity.Slope_BotNDVI;
-    CityEquity.LME_Delta_CI_L_NDVI   = NaN(height(CityEquity),1);
-    CityEquity.LME_Delta_CI_U_NDVI   = NaN(height(CityEquity),1);
+    CityEquity.LME_DeltaSlope_NDVI = CityEquity.Slope_TopNDVI - CityEquity.Slope_BotNDVI;
+    CityEquity.LME_CI_L_NDVI = NaN(height(CityEquity),1);
+    CityEquity.LME_CI_U_NDVI = NaN(height(CityEquity),1);
 end
 
+% ----- Join LST LME deltas -----
 if ~isempty(T_LST)
-    CityEquity = outerjoin(CityEquity, T_LST(:,{'City','Delta_TopMinusBottom','Delta_CI_L','Delta_CI_U'}), ...
+    CityEquity = outerjoin( ...
+        CityEquity, ...
+        T_LST(:,{'City','Delta_TopMinusBottom','Delta_CI_L','Delta_CI_U'}), ...
         'Keys','City','MergeKeys',true,'Type','left');
-    CityEquity.Properties.VariableNames(end-2:end) = ...
-        {'LME_DeltaSlope_LST','LME_Delta_CI_L_LST','LME_Delta_CI_U_LST'};
+
+    vn = CityEquity.Properties.VariableNames;
+    if ismember('Delta_TopMinusBottom', vn)
+        idx = find(strcmp(vn,'Delta_TopMinusBottom'), 1, 'last');
+        CityEquity.Properties.VariableNames{idx} = 'LME_DeltaSlope_LST';
+    end
+    vn = CityEquity.Properties.VariableNames;
+    if ismember('Delta_CI_L', vn)
+        idx = find(strcmp(vn,'Delta_CI_L'), 1, 'last');
+        CityEquity.Properties.VariableNames{idx} = 'LME_CI_L_LST';
+    end
+    vn = CityEquity.Properties.VariableNames;
+    if ismember('Delta_CI_U', vn)
+        idx = find(strcmp(vn,'Delta_CI_U'), 1, 'last');
+        CityEquity.Properties.VariableNames{idx} = 'LME_CI_U_LST';
+    end
 else
-    CityEquity.LME_DeltaSlope_LST    = CityEquity.Slope_BotLST - CityEquity.Slope_TopLST;
-    CityEquity.LME_Delta_CI_L_LST    = NaN(height(CityEquity),1);
-    CityEquity.LME_Delta_CI_U_LST    = NaN(height(CityEquity),1);
+    CityEquity.LME_DeltaSlope_LST = CityEquity.Slope_BotLST - CityEquity.Slope_TopLST;
+    CityEquity.LME_CI_L_LST = NaN(height(CityEquity),1);
+    CityEquity.LME_CI_U_LST = NaN(height(CityEquity),1);
 end
 
-% After CityEquity is built (has Slope_BotNDVI, Slope_TopNDVI, etc.)
-CityEquity.B_NDVI = abs(CityEquity.Slope_BotNDVI) - abs(CityEquity.Slope_TopNDVI);
-CityEquity.B_LST  = abs(CityEquity.Slope_BotLST ) - abs(CityEquity.Slope_TopLST );
-% (ANOVA on B/Δ can be skipped as you noted.)
-
-
-% Write CSV
+% Write CSV (authoritative OLS plus LME extras)
 csvName = 'equity_city_changes.csv';
 writetable(CityEquity, csvName);
 
@@ -366,15 +377,74 @@ writetable(CityEquity, csvName);
 G = groupsummary(Panel, {'City','Year'});
 fprintf('City-years kept: %d  | MEAN tracts per city-year (pre-tail) ~ your input-side stat\n', height(G));
 
-% Tails per city-year
-% Recompute nb/nt once more (lightweight) to print MEANs:
-% (If you want exact values, instrument inside the loop and accumulate.)
+%% ===================== 6) PRETTY PRINTS (use LME per-decade deltas) =======
+% Use T_LST / T_NDVI (LME random-effect extraction) for both ranking and endpoints
+if ~isempty(T_LST)
+    Print_LST = T_LST(:, {'City','Slope_Bottom','Slope_Top','Delta_TopMinusBottom'});
+    Print_LST.Properties.VariableNames = {'City','Slope_BotLST','Slope_TopLST','DeltaLST_TopMinusBottom'};
+else
+    % Fallback to OLS-based table if needed
+    Print_LST = CityEquity(:,{'City','Slope_BotLST','Slope_TopLST'});
+    Print_LST.DeltaLST_TopMinusBottom = Print_LST.Slope_TopLST - Print_LST.Slope_BotLST;
+end
+Print_LST = sortrows(Print_LST,'DeltaLST_TopMinusBottom','descend');
 
+if ~isempty(T_NDVI)
+    Print_NDVI = T_NDVI(:, {'City','Slope_Bottom','Slope_Top','Delta_TopMinusBottom'});
+    Print_NDVI.Properties.VariableNames = {'City','Slope_BotNDVI','Slope_TopNDVI','DeltaNDVI_TopMinusBottom'};
+    % Balance (+ uplift ; − erosion) from LME per-tail slopes
+    Print_NDVI.NDVI_Balance = abs(Print_NDVI.Slope_BotNDVI) - abs(Print_NDVI.Slope_TopNDVI);
+    BalanceDeadzone = 1e-3;
+    mech = repmat("both",height(Print_NDVI),1);
+    mech(Print_NDVI.NDVI_Balance >  BalanceDeadzone) = "uplift (bottom-tail greening)";
+    mech(Print_NDVI.NDVI_Balance < -BalanceDeadzone) = "erosion (top-tail decline)";
+    Print_NDVI.NDVI_Mechanism = mech;
+    % Equity gain for NDVI: more negative Top−Bottom => sort ascending
+    Print_NDVI = sortrows(Print_NDVI,'DeltaNDVI_TopMinusBottom','ascend');
+else
+    % Fallback to OLS-based table and compute balance/mechanism
+    Print_NDVI = CityEquity(:,{'City','Slope_BotNDVI','Slope_TopNDVI'});
+    Print_NDVI.DeltaNDVI_TopMinusBottom = Print_NDVI.Slope_TopNDVI - Print_NDVI.Slope_BotNDVI;
+    Print_NDVI.NDVI_Balance = abs(Print_NDVI.Slope_BotNDVI) - abs(Print_NDVI.Slope_TopNDVI);
+    BalanceDeadzone = 1e-3;
+    mech = repmat("both",height(Print_NDVI),1);
+    mech(Print_NDVI.NDVI_Balance >  BalanceDeadzone) = "uplift (bottom-tail greening)";
+    mech(Print_NDVI.NDVI_Balance < -BalanceDeadzone) = "erosion (top-tail decline)";
+    Print_NDVI.NDVI_Mechanism = mech;
+    Print_NDVI = sortrows(Print_NDVI,'DeltaNDVI_TopMinusBottom','ascend');
+end
 
-%% ===================== 6) BUNDLE EVERYTHING & ANNOUNCE =====================
+% Mixed-model FE interactions (already computed as b_int_ndvi, b_int_lst)
+fprintf('\n=== Mixed-model fixed effects (time×Top) ===\n');
+fprintf('NDVI: time×Top = %+0.3f NDVI/decade\n', b_int_ndvi);
+fprintf('LST:  time×Top = %+0.3f °C/decade\n',  b_int_lst);
+
+fprintf('\n=== Largest LST equity gains (ΔLST = Top − Bottom, °C/decade) ===\n');
+nShow = min(10, height(Print_LST));
+for i = 1:nShow
+    fprintf('%2d) %-22s  ΔLST = %+0.2f  (Top=%+.2f, Bottom=%+.2f)\n', ...
+        i, Print_LST.City{i}, Print_LST.DeltaLST_TopMinusBottom(i), ...
+        Print_LST.Slope_TopLST(i), Print_LST.Slope_BotLST(i));
+end
+
+% Sanity: any city where bottom warmed faster than top?
+bad = find(Print_LST.DeltaLST_TopMinusBottom < 0);
+fprintf('\n[Check] Cities where Bottom warmed faster than Top (should be none): %d\n', numel(bad));
+if ~isempty(bad), disp(Print_LST.City(bad)); end
+
+fprintf('\n=== Largest NDVI equity gains (most negative ΔNDVI = Top − Bottom, per decade) ===\n');
+nShow = min(10, height(Print_NDVI));
+for i = 1:nShow
+    fprintf('%2d) %-22s  ΔNDVI = %+0.4f  (Top=%+.4f, Bottom=%+.4f)  |  Balance=%+.4f → %s\n', ...
+        i, Print_NDVI.City{i}, Print_NDVI.DeltaNDVI_TopMinusBottom(i), ...
+        Print_NDVI.Slope_TopNDVI(i), Print_NDVI.Slope_BotNDVI(i), ...
+        Print_NDVI.NDVI_Balance(i),  Print_NDVI.NDVI_Mechanism(i));
+end
+
+%% ===================== 7) BUNDLE EVERYTHING & ANNOUNCE =====================
 S = struct();
 S.config       = struct('TailPct',TailPct,'YearsUse',YearsUse,'MetricNames',MetricNames, ...
-                        'MinTracts',MinTracts,'OverlapField',OverlapField,'Alpha',Alpha, ...
+                        'MinTractsCity',MinTractsCity,'OverlapField',OverlapField,'Alpha',Alpha, ...
                         'Cities',CityListUse);
 S.panel        = Panel;
 S.long         = struct('NDVI',Tlong_NDVI,'LST',Tlong_LST);
@@ -388,6 +458,7 @@ S.labels       = Labels;
 S.labelCounts  = LabelCounts;
 S.details      = Details;
 S.cityEquity   = CityEquity;
+S.printTables  = struct('LST',Print_LST,'NDVI',Print_NDVI);
 
 assignin('base','Panel',Panel);
 assignin('base','Tlong_NDVI',Tlong_NDVI);
@@ -397,8 +468,8 @@ assignin('base','lmeL',lmeL);
 assignin('base','CityEquity',CityEquity);
 assignin('base','S',S);
 
-fprintf('Done. Built %0.0f%%-tail panel with filters, fit LMEs (with random slopes when possible), validated interactions,\n', 100*TailPct);
-fprintf('labeled cities, and saved per-city equity changes.\n');
+fprintf('\nDone. Built %0.0f%%-tail panel with filters, fit LMEs (with random slopes when possible), validated interactions,\n', 100*TailPct);
+fprintf('labeled cities, saved per-city equity changes, and printed ranked highlights.\n');
 fprintf('Workspace vars: Panel, Tlong_NDVI, Tlong_LST, lmeN, lmeL, CityEquity, S\n');
 fprintf('CSV written: %s\n\n', csvName);
 
@@ -414,6 +485,8 @@ candAll = [string(cands)];
 j = find(ismember(V, candAll), 1, 'first');
 if isempty(j), inc = []; else, inc = toNumSafe(T.(V(j))); end
 end
+
+function s = repfun(txt,n), s = repmat(string(txt), n, 1); end
 
 function [b,p] = local_city_slope(T, yvar)
 b = NaN; p = NaN;
@@ -475,18 +548,16 @@ try
     REt = getREtable(mdl);
     nm = string(REt.Name); lev = string(REt.Level); est = REt.Estimate; se = REt.SE;
 
-    % must have at least some city-level RE for time_dec OR interaction
     has_time = any(nm=="time_dec");
     has_int  = any(contains(nm,"time_dec") & contains(nm,"tail"));
     if ~has_time && ~has_int, return; end
 
-    % choose the interaction name in RE matching FE if present
     if has_int
         intNames = unique(nm(contains(nm,"time_dec") & contains(nm,"tail")));
         hit = find(intNames == intNameFE, 1);
         if ~isempty(hit), intName = intNames(hit); else, intName = intNames(1); end
     else
-        intName = intNameFE; % will imply u_int = 0 when absent
+        intName = intNameFE; % implies u_int = 0 when absent
     end
 
     cities = unique(lev,'stable'); nC = numel(cities);
@@ -503,19 +574,13 @@ try
     slope_top    = b_time + b_int + u_time + u_int;
     delta        = b_int + u_int;
 
-    % FE SE for the interaction (always available from fixed effects)
-	se_fe = CF.SE(i_int);
-
-	% If RE SEs are missing (NaN), treat them as 0 so CIs fall back to FE width.
-	se_int(isnan(se_int)) = 0;
-
-	% Combine FE and RE uncertainty (approx. independence)
-	se_delta = sqrt(se_fe.^2 + se_int.^2);
-
-	z = 1.96;
-	delta_lo = delta - z.*se_delta;
-	delta_hi = delta + z.*se_delta;
-
+    % Combine FE & RE uncertainty for a rough CI
+    se_fe = CF.SE(i_int);
+    se_int(isnan(se_int)) = 0;
+    se_delta = sqrt(se_fe.^2 + se_int.^2);
+    z = 1.96;
+    delta_lo = delta - z.*se_delta;
+    delta_hi = delta + z.*se_delta;
 
     T = table(cities, slope_bottom, slope_top, delta, delta_lo, delta_hi, ...
         'VariableNames', {'City','Slope_Bottom','Slope_Top','Delta_TopMinusBottom','Delta_CI_L','Delta_CI_U'});

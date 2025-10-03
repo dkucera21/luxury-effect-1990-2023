@@ -1,6 +1,5 @@
 %% build_census_tables.m  —  HARMONIZED EDITION (with TRACT_ID)
-% Rebuilds CENSUS_TABLES_rebuilt from harmonized CSVs:
-%   E:\LUXURY_NATL_FINAL\TRACTS\RAW_CENSUS\NEW_MAT_TABLES\T_YYYY_CITY.csv
+% Rebuilds CENSUS_TABLES_rebuilt from harmonized CSVs
 %
 % Adds/keeps a year-specific tract ID column and creates a unified TRACT_ID.
 % Year → ID column:
@@ -21,13 +20,13 @@
 %   • build CityListMaster by coverage rules.
 
 %% ---------------- User settings ----------------
-csvFolder  = 'E:\LUXURY_NATL_FINAL\TRACTS\RAW_CENSUS\NEW_MAT_TABLES'; % harmonized CSVs
+csvFolder  = 'E:\LUXURY_NATL\'; % Replace with the name of the folder that contains NEW_MAT_TABLES from Zenodo
 CoverageThreshold   = 50;     % require PCT_OVERLAP >= this for a tract to be "valid"
 MinTracts           = 5;      % minimum valid tracts per city-year
 YearsUse            = [1990 2000 2010 2020 2023];
 StrictMode          = true;   % true: all requested years for a city must pass; false: any year passes
 SkipMissingCoverage = true;   % if PCT_OVERLAP missing, pass (true) or fail (false)
-ExcludeCities       = ["Anchorage","Fairbanks","HiloHI","Honolulu","Ponce","SanJuan"]; % optional
+ExcludeCities       = ["Anchorage","Fairbanks","HiloHI","Honolulu","Ponce","SanJuan"]; % optional. Removed to maintain the analysis in the Lower 48.
 
 % === ADD: CPI constants & mapping (base = 2023) ===
 CPI = struct('y2023',304.702, 'y2020',258.811, 'y2010',218.056, 'y1999',166.600, 'y1989',124.000);
@@ -298,3 +297,5 @@ assignin('base','CityPassDiag',          CityPassDiag);
 function out = ternStr(cond, a, b)
     if cond, out = a; else, out = b; end
 end
+
+clearvars -except CENSUS_TABLES_rebuilt CityListMaster

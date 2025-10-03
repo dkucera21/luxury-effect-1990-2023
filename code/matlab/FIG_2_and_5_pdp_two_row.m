@@ -8,12 +8,12 @@
 %% USER INPUT (edit these)
 %% =========================
 % Data source: 'MEANS' (A_HYPO_MEANS_Z / DVs from A_HYPO_MEANS)
-%              'TRENDS' (A_HYPO_TRENDS_Z / DVs from A_HYPO_TRENDS)
-whichTable = 'TRENDS';   % 'MEANS' or 'TRENDS'
+%              'TRENDS' (A_HYPO_TRENDS_Z / DVs from CityTrends_* tables; DV=Slope)
+whichTable = 'MEANS';   % 'MEANS' or 'TRENDS'
 
-% Dependent variables (defaults auto-filled below from whichTable)
+% Dependent variables (labels only; for TRENDS, values come from CityTrends_* tables)
 % - For MEANS (non-z DV table A_HYPO_MEANS):   LUX_NDVI_per10k, LUX_LST_per10k
-% - For TRENDS (non-z DV table A_HYPO_TRENDS): TRENDS_LME_LE_MEAN_NDVI_per10k, TRENDS_LME_LE_MEAN_LST_per10k
+% - For TRENDS (CityTrends_* tables):          defaults to MEDIAN_* slopes (fallbacks built in)
 respNDVI = '';  % leave '' to use default for chosen whichTable
 respLST  = '';  % leave '' to use default for chosen whichTable
 
@@ -28,12 +28,11 @@ allowNDVIonLST = true;
 %% Pathway-specific predictor excludes
 % Names: exact matches.  Patterns: regular expressions (case-insensitive).
 % Defaults reproduce your earlier logic (esp. NDVI anti-leak).
-ndviExcludeNames    = [ "TRENDS_LME_LE_MEAN_LST_per10k"];  % e.g., ["SomeDerivedNDVIThing"]
+ndviExcludeNames    = [ "TRENDS_LME_LE_MEAN_LST_per10k","MEAN_NHGIS_PercentBLACKNHP","MEAN_NHGIS_PercentBLACK"];  % reduce redundant selected predictors
 ndviExcludePatterns = [ "^LUX_NDVI($|_)", "^dLE_.*NDVI.*" ];  % anti-leak for NDVI DV
 
-lstExcludeNames     = [ ];  % e.g., ["SomeLSTHelperVar"]
-lstExcludePatterns  = [ ];  % add regex if needed
-
+lstExcludeNames     = [ ];
+lstExcludePatterns  = [ ];
 
 %% Reproducibility & model knobs
 rngSeed          = 42;           % global RNG seed
@@ -52,27 +51,31 @@ plotWidthPx      = 1400;         % figure width
 plotHeightPx     = 800;          % figure height
 
 %% Universal predictor exclusions (NEVER allowed as predictors)
-% (Case-insensitive contains/equals handled below)
 universalExclude = [ ...
-    "TRENDS_LUX_NDVI_per10k", ...   % legacy
     "TRENDS_RAW_INCOME", ...
     "LUX_LST_per10k", ...
     "MEAN_LUX_LST_per10k", ...
     "RAW_INCOME", ...
-	"mean_SSM_2023_pm_median", ...
-	"mean_SSM_2023_am_median", ...
-	"Longitude" , ...
-	"era5_soil_temperature_level_2", ...
-	"era5_soil_temperature_level_1", ...
-	"NHGIS_PercMale", ...
-	"TRENDS_Longitude", ...
-	"MEAN_Longitude",...
-	"TRENDS_CENSUS_TRACT_AREA", ...
-	
+    "mean_SSM_2023_pm_median", ...
+    "mean_SSM_2023_am_median", ...
+    "Longitude" , ...
+    "era5_soil_temperature_level_2", ...
+    "era5_soil_temperature_level_1", ...
+    "NHGIS_PercMale", ...
+	"era5_skin_temperature",... %correlate with landsat LST
+    "TRENDS_Longitude", ...
+    "MEAN_Longitude",...
+    "TRENDS_CENSUS_TRACT_AREA", ...
+	"TRENDS_LUX_LST_per10k",...
+	"MEAN_CENSUS_TRACT_AREA",...
+	'MEAN_NHGIS_PercOWNOCCmortgage',... % Not a reasonable predictor
+	"TRENDS_LUX_LST_per10k",...
+	"TRENDS_LME_TREND_dLE_MEAN_LST_per10k_perYR",...
+	"TRENDS_LME_TREND_dLE_MEAN_NDVI_per10k_perYR",...
 ];
 
-%% Data-source-specific soft exclusions (declared here for clarity)
-keepSpei = "spei_SPEI_12_month","spei_SPEI_06_month","spei_SPEI_48_month" ;   % only allow this SPEI
+%% Data-source-specific soft exclusions
+keepSpei = ["spei_SPEI_12_month","spei_SPEI_06_month","spei_SPEI_48_month" ];   % only allow these SPEI
 dropIfContains = ["gldas"];        % drop any var containing 'gldas' (case-insensitive)
 
 %% =========================
@@ -93,24 +96,76 @@ switch upper(strtrim(whichTable))
         if isempty(respNDVI), respNDVI = 'LUX_NDVI_per10k'; end
         if isempty(respLST),  respLST  = 'LUX_LST_per10k';  end
         tableTag = 'A_HYPO_MEANS';
+
     case 'TRENDS'
         assert(exist('A_HYPO_TRENDS_Z','var')==1 && istable(A_HYPO_TRENDS_Z), ...
             'A_HYPO_TRENDS_Z not found or not a table.');
-        assert(exist('A_HYPO_TRENDS','var')==1 && istable(A_HYPO_TRENDS), ...
-            'A_HYPO_TRENDS (non-z) not found or not a table.');
         tblZ   = A_HYPO_TRENDS_Z;
-        tblRAW = A_HYPO_TRENDS;
-        if isempty(respNDVI), respNDVI = 'TRENDS_LME_LE_MEAN_NDVI_per10k'; end
-        if isempty(respLST),  respLST  = 'TRENDS_LME_LE_MEAN_LST_per10k';  end
+
+        % ---- Build tblRAW from CityTrends_* tables (use Slope) ----
+        % Preference: MEDIAN_*; fallback to MEAN_*; fallback to shims CityTrends_NDVI/LST
+        haveMed = exist('CityTrends_MEDIAN_NDVI','var')==1 && istable(CityTrends_MEDIAN_NDVI) && ...
+                  exist('CityTrends_MEDIAN_LST','var')==1  && istable(CityTrends_MEDIAN_LST);
+        haveMean= exist('CityTrends_MEAN_NDVI','var')==1   && istable(CityTrends_MEAN_NDVI)   && ...
+                  exist('CityTrends_MEAN_LST','var')==1    && istable(CityTrends_MEAN_LST);
+        haveShim= exist('CityTrends_NDVI','var')==1        && istable(CityTrends_NDVI)        && ...
+                  exist('CityTrends_LST','var')==1         && istable(CityTrends_LST);
+
+        if haveMed
+            Tn = CityTrends_MEDIAN_NDVI; Tl = CityTrends_MEDIAN_LST;
+            if isempty(respNDVI), respNDVI = 'LE_trend_NDVI'; end
+            if isempty(respLST),  respLST  = 'LE_trend_LST';  end
+        elseif haveMean
+            Tn = CityTrends_MEAN_NDVI;   Tl = CityTrends_MEAN_LST;
+            if isempty(respNDVI), respNDVI = 'LE_trend_NDVI'; end
+            if isempty(respLST),  respLST  = 'LE_trend_LST';  end
+        elseif haveShim
+            Tn = CityTrends_NDVI;        Tl = CityTrends_LST;
+            if isempty(respNDVI), respNDVI = 'LE_trend_NDVI'; end
+            if isempty(respLST),  respLST  = 'LE_trend_LST';  end
+        else
+            error(['CityTrends_* tables not found. Expected MEDIAN or MEAN versions, ' ...
+                   'or CityTrends_NDVI/LST shims.']);
+        end
+
+        % Harmonize and keep only City, Slope
+        Tn = Tn(:, intersect(["City","Slope"], string(Tn.Properties.VariableNames)));
+        Tl = Tl(:, intersect(["City","Slope"], string(Tl.Properties.VariableNames)));
+        Tn.City = string(Tn.City); Tl.City = string(Tl.City);
+
+        % Join to make a tiny raw DV table with named columns for NDVI and LST slopes
+        J = outerjoin(Tn, Tl, 'Keys','City', 'MergeKeys', true, 'Type','left', ...
+                      'LeftVariables', {'City','Slope'}, ...
+                      'RightVariables', {'Slope'});
+        % Rename Slope columns to user labels
+        J.Properties.VariableNames{'Slope_Tn'} = respNDVI; % older MATLAB names auto like Slope_Tn/Slope_Tl
+        if ~ismember(respNDVI, string(J.Properties.VariableNames))
+            % Handle cases where name became Slope_left
+            vn = string(J.Properties.VariableNames);
+            jN = find(contains(vn,'Slope') & contains(vn, {'Tn','left'}, 'IgnoreCase',true), 1);
+            if ~isempty(jN), J.Properties.VariableNames{jN} = respNDVI; end
+        end
+        J.Properties.VariableNames{'Slope_Tl'} = respLST;
+        if ~ismember(respLST, string(J.Properties.VariableNames))
+            vn = string(J.Properties.VariableNames);
+            jL = find(contains(vn,'Slope') & contains(vn, {'Tl','right'}, 'IgnoreCase',true), 1);
+            if ~isempty(jL), J.Properties.VariableNames{jL} = respLST; end
+        end
+
+        % Final DV table aligned later in build_xy
+        tblRAW = table(J.City, J.(respNDVI), J.(respLST), 'VariableNames', {'City', respNDVI, respLST});
+
         tableTag = 'A_HYPO_TRENDS';
+
     otherwise
         error('whichTable must be ''MEANS'' or ''TRENDS''.');
 end
 
-% Keep valid-city rows
+% Keep valid-city rows in Z (predictors)
 assert(ismember('City', tblZ.Properties.VariableNames), 'Predictor table needs a City column.');
 tblZ = tblZ(ismember(strtrim(string(tblZ.City)), citySet), :);
 
+% Harmonize NON-Z DV table City
 assert(ismember('City', tblRAW.Properties.VariableNames), 'NON-Z table needs a City column.');
 tblRAW.City = string(tblRAW.City);
 
@@ -119,7 +174,7 @@ rng(rngSeed, 'twister');
 if useParallelFits && isempty(gcp('nocreate')), try parpool; catch, end, end
 optsPar = statset('UseParallel', ~isempty(gcp('nocreate')));
 optsSS  = statset('UseParallel', false);   % keep stability loop deterministic
-getKfold = @(m) max(2, min(5, floor(m/2))); %#ok<NASGU>  % helper used below
+getKfold = @(m) max(2, min(5, floor(m/2))); %#ok<NASGU>
 
 %% =========================
 %% Build exclusion masks (top-level)
@@ -129,7 +184,7 @@ allVars0 = string(tblZ.Properties.VariableNames);
 % SPEI rule: keep only keepSpei, drop other spei*
 isSpei   = contains(lower(allVars0), 'spei');
 speiAll  = allVars0(isSpei);
-speiKeep = speiAll(strcmpi(speiAll, keepSpei));
+speiKeep = speiAll(ismember(lower(speiAll), lower(keepSpei)));
 speiDrop = setdiff(speiAll, speiKeep, 'stable');
 
 % GLDAS drop
@@ -138,7 +193,46 @@ gldasDrop = allVars0( contains(lower(allVars0), lower(dropIfContains)) );
 % Universal list (intersect with present variables)
 univDrop = intersect(universalExclude, allVars0, 'stable');
 
-baseExclusions = unique([ "City","BIOME_cat","KOPPEN_cat", speiDrop, gldasDrop, univDrop ], 'stable');
+baseExclusions = unique([ "City","BIOMES_cat","KOPPEN_cat", speiDrop, gldasDrop, univDrop ], 'stable');
+
+%% EXTRA LEAKAGE GUARD FOR TRENDS: drop any luxury-effect–derived predictors
+if strcmpi(whichTable,'TRENDS')
+    allVars0 = string(tblZ.Properties.VariableNames);
+
+    % Known exact names you already flagged + a few common variants
+    leLeakNames = [
+        "TRENDS_LME_TREND_dLE_MEAN_LST_per10k_perYR"
+        "TRENDS_LME_TREND_dLE_MEAN_NDVI_per10k_perYR"
+        "TRENDS_LME_LE_MEAN_LST_per10k"
+        "TRENDS_LME_LE_MEAN_NDVI_per10k"
+        "LUX_NDVI_per10k"
+        "LUX_LST_per10k"
+        "TRENDS_LUX_NDVI_per10k"
+        "TRENDS_LUX_LST_per10k"
+    ];
+
+    % Regex patterns to catch *any* luxury-effect derived feature names
+    % (covers dLE_, LE_, LME_LE_, LUX_* and variants for NDVI/LST/MEAN/MEDIAN, trend, perYR, etc.)
+    leLeakRegex = [
+        "(^|_)dLE_"
+        "(^|_)LE_"
+        "(^|_)LME_LE_"
+        "(^|_)LUX_(NDVI|LST)"
+    ];
+
+    leakMask = ismember(allVars0, leLeakNames);
+    for p = leLeakRegex(:)'
+        leakMask = leakMask | ~cellfun('isempty', regexpi(allVars0, char(p), 'once'));
+    end
+
+    leakDrop = allVars0(leakMask);
+    if ~isempty(leakDrop)
+        baseExclusions = unique([baseExclusions(:); leakDrop(:)], 'stable');
+        fprintf('[Guard] Dropped %d LE-derived predictors in TRENDS mode:\n  %s\n', ...
+            numel(leakDrop), strjoin(cellstr(leakDrop), ', '));
+    end
+end
+
 
 %% =========================
 %% Helper: Build predictors & y for a given response
@@ -223,7 +317,6 @@ function [tblPred, yRaw, predsAll] = build_xy( ...
     end
 end
 
-
 %% =========================
 %% LST DV (bottom row) — NDVI predictors allowed
 %% =========================
@@ -238,12 +331,12 @@ X1 = tbl_LSTsrc{:, preds_LST}; n1 = height(tbl_LSTsrc);
 countsSel1 = zeros(1, numel(preds_LST)); runsEff1 = 0;
 for r = 1:R_stab_LST
     rng(1000+r, 'twister');
-	nSub = max(5, round(subFrac_LST*n1));
-	if nSub >= n1
-		idxSub = (1:n1)';                  % no subsample if tiny n
-	else
-		idxSub = randsample(n1, nSub, false);
-	end
+    nSub = max(5, round(subFrac_LST*n1));
+    if nSub >= n1
+        idxSub = (1:n1)';                  % no subsample if tiny n
+    else
+        idxSub = randsample(n1, nSub, false);
+    end
 
     if numel(idxSub) < 3, continue; end
     Kfold_eff = max(2, min(5, floor(numel(idxSub)/2)));
@@ -257,7 +350,8 @@ for r = 1:R_stab_LST
         if ~isempty(idx)
             countsSel1 = countsSel1 + (B(:,idx) ~= 0)'; runsEff1 = runsEff1 + 1;
         end
-    catch, continue
+    catch
+        continue
     end
 end
 if runsEff1 > 0
@@ -278,12 +372,16 @@ mdlStep1 = stepwiselm(tbl2,'y ~ 1', 'Upper', sprintf('y ~ %s', strjoin(cellstr(c
     'PEnter',0,'PRemove',-Inf,'NSteps',nTop1,'Criterion','rsquared','Verbose',0);
 sel_LST = setdiff(mdlStep1.PredictorNames, '(Intercept)', 'stable');
 
-mdl_LST = fitlm(tbl_LSTsrc, sprintf('%s ~ %s', respLST, strjoin(cellstr(sel_LST),' + ')));
+% Final model fit (always use y)
+tblFit_LST = tbl_LSTsrc; tblFit_LST.y = y_LST;
+mdl_LST = fitlm(tblFit_LST, sprintf('y ~ %s', strjoin(cellstr(sel_LST),' + ')));
+
 R2f1    = mdl_LST.Rsquared.Ordinary;
 dR2_1   = nan(numel(sel_LST),1);
 for k=1:numel(sel_LST)
     keepk = sel_LST; keepk(k)=[];
-    dR2_1(k) = R2f1 - fitlm(tbl_LSTsrc, sprintf('%s ~ %s', respLST, strjoin(cellstr(keepk),' + '))).Rsquared.Ordinary;
+    mdlk  = fitlm(tblFit_LST, sprintf('y ~ %s', strjoin(cellstr(keepk),' + ')));
+    dR2_1(k) = R2f1 - mdlk.Rsquared.Ordinary;
 end
 imp_LST = (sum(dR2_1)>0) .* (dR2_1 / max(sum(dR2_1), eps));
 
@@ -311,12 +409,12 @@ nBoot = R_stab_NDVI; subRate = subFrac_NDVI;
 cand2  = strings(0,1); runsEff2 = 0; selCounts2 = containers.Map('KeyType','char','ValueType','double');
 for b = 1:nBoot
     rng(2000 + b, 'twister');
-	nSub = max(5, round(subRate*n2));
-	if nSub >= n2
-		idx = (1:n2)';                     % no subsample if tiny n
-	else
-		idx = randsample(n2, nSub, false);
-	end
+    nSub = max(5, round(subRate*n2));
+    if nSub >= n2
+        idx = (1:n2)';                     % no subsample if tiny n
+    else
+        idx = randsample(n2, nSub, false);
+    end
 
     if numel(idx) < 3, continue; end
     try
@@ -328,12 +426,13 @@ for b = 1:nBoot
         if ~isempty(selb)
             cand2 = [cand2; string(selb(:))]; %#ok<AGROW>
             for s = 1:numel(selb)
-                key = char(selb{s}); 
+                key = char(selb{s});
                 if isKey(selCounts2, key), selCounts2(key) = selCounts2(key) + 1;
                 else, selCounts2(key) = 1; end
             end
         end
-    catch, continue
+    catch
+        continue
     end
 end
 
@@ -368,13 +467,15 @@ mdlStep2 = stepwiselm(tbl2, 'y ~ 1', 'Upper', upperForm2, ...
     'PEnter',0, 'PRemove',-Inf, 'NSteps',nTop2, 'Criterion','rsquared', 'Verbose',0);
 sel_NDVI = setdiff(mdlStep2.PredictorNames, '(Intercept)', 'stable');
 
-mdl_NDVI = fitlm(tbl_NDVIsrc, sprintf('%s ~ %s', respNDVI, strjoin(cellstr(sel_NDVI),' + ')));
+% Final model fit (always use y)
+tblFit_NDVI = tbl_NDVIsrc; tblFit_NDVI.y = y_NDVI;
+mdl_NDVI = fitlm(tblFit_NDVI, sprintf('y ~ %s', strjoin(cellstr(sel_NDVI),' + ')));
 R2f2     = mdl_NDVI.Rsquared.Ordinary;
 
 dR2_2 = nan(numel(sel_NDVI),1);
 for k = 1:numel(sel_NDVI)
     keepk = sel_NDVI; keepk(k) = [];
-    mdlk  = fitlm(tbl_NDVIsrc, sprintf('%s ~ %s', respNDVI, strjoin(cellstr(keepk),' + ')));
+    mdlk  = fitlm(tblFit_NDVI, sprintf('y ~ %s', strjoin(cellstr(keepk),' + ')));
     dR2_2(k) = R2f2 - mdlk.Rsquared.Ordinary;
 end
 imp_NDVI = (sum(dR2_2)>0) .* (dR2_2 / max(sum(dR2_2), eps));
@@ -445,20 +546,20 @@ end
 
 % Global cosmetics
 axAll = findall(gcf,'Type','axes'); set(axAll,'XGrid','off','YGrid','off','ZGrid','off','XMinorGrid','off','YMinorGrid','off');
-sgtitle(sprintf('Top predictors — %s (Z predictors, NON-Z DVs) — %s', ...
+sgtitle(sprintf('Top predictors — %s (Z predictors, NON-Z DVs or CityTrends slopes) — %s', ...
         strrep(respNDVI,'_','\_'), tableTag), 'FontSize',12);
 
 %% =========================
 %% Fit summaries
 %% =========================
-mkRow = @(resp, mdl) {resp, mdl.Rsquared.Ordinary, mdl.Rsquared.Adjusted, mdl.RMSE, ...
-                      mdl.NumObservations, numel(mdl.PredictorNames), strjoin(mdl.PredictorNames, ', ')};
+mkRow = @(label, mdl, nPred) {label, mdl.Rsquared.Ordinary, mdl.Rsquared.Adjusted, mdl.RMSE, ...
+                      mdl.NumObservations, nPred, strjoin(mdl.PredictorNames, ', ')};
 FitSummary = cell2table( ...
-   [mkRow(respLST,  mdl_LST); ...
-    mkRow(respNDVI, mdl_NDVI)], ...
+   [mkRow(respLST,  mdl_LST,  numel(sel_LST)); ...
+    mkRow(respNDVI, mdl_NDVI, numel(sel_NDVI))], ...
    'VariableNames', {'Response','R2','R2Adj','RMSE','N','NumPredictors','Predictors'});
 disp(FitSummary);
 fprintf('Adjusted R² — %s : %.3f (R²=%.3f, k=%d, n=%d)\n', ...
-    respLST,  mdl_LST.Rsquared.Adjusted,  mdl_LST.Rsquared.Ordinary,  numel(mdl_LST.PredictorNames),  mdl_LST.NumObservations);
+    respLST,  mdl_LST.Rsquared.Adjusted,  mdl_LST.Rsquared.Ordinary,  numel(sel_LST),  mdl_LST.NumObservations);
 fprintf('Adjusted R² — %s: %.3f (R²=%.3f, k=%d, n=%d)\n', ...
-    respNDVI, mdl_NDVI.Rsquared.Adjusted, mdl_NDVI.Rsquared.Ordinary, numel(mdl_NDVI.PredictorNames), mdl_NDVI.NumObservations);
+    respNDVI, mdl_NDVI.Rsquared.Adjusted, mdl_NDVI.Rsquared.Ordinary, numel(sel_NDVI), mdl_NDVI.NumObservations);

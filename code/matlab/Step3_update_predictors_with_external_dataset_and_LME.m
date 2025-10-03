@@ -1,8 +1,16 @@
 %% === Update predictor tables with Climate/NHGIS + LME luxury-effect slopes, then Z-score ===
 % Prereqs in memory: CENSUS_TABLES_rebuilt (struct), A_HYPO_MEANS, A_HYPO_MEDIANS, A_HYPO_MEANS_TEMPORAL
 % Also CityListMaster (or MasterCities/CityNames as fallback).
+%
+% Adds:
+%   - Prefixed trend columns (TRENDS_*)
+%   - LME_LE_MEAN_NDVI_per10k, LME_LE_MEAN_LST_per10k
+%   - LME_TREND_dLE_* per-year interaction trends
+%   - Z-scored tables *_Z
+%
+% Robust to prior runs (drops/overwrites colliding target names before renaming).
 
-baseDir = 'E:\LUXURY_NATL_FINAL';   % adjust if needed
+baseDir = 'E:\LUXURY_NATL\';   % Change to the name of the folder that contains the CSV tables from the linked Zenodo repository
 
 %% -------------------- Settings for mixed-effects --------------------
 yearsUse  = [1990 2000 2010 2020 2023];
@@ -56,7 +64,7 @@ N_TEMP    = rd('TABLE_NHGIS_MEANS_TEMPORAL.csv');   % “MEANS_TEMPORAL”
 N_TR      = rd('TABLE_NHGIS_MEAN_TREND.csv');
 N_TRP     = rd('TABLE_NHGIS_MEAN_TREND_pvals.csv');
 
-% Join City-level
+% Join City-level (means/medians)
 if ~isempty(C_MEANS),   A_HYPO_MEANS   = jC(A_HYPO_MEANS,   C_MEANS);   end
 if ~isempty(N_MEANS),   A_HYPO_MEANS   = jC(A_HYPO_MEANS,   N_MEANS);   end
 if ~isempty(C_MEDIANS), A_HYPO_MEDIANS = jC(A_HYPO_MEDIANS, C_MEDIANS); end
@@ -70,27 +78,56 @@ assignin('base','A_HYPO_MEANS',A_HYPO_MEANS);
 assignin('base','A_HYPO_MEDIANS',A_HYPO_MEDIANS);
 assignin('base','A_HYPO_MEANS_TEMPORAL',A_HYPO_MEANS_TEMPORAL);
 
-%% -------------------- Build/refresh trends from temporal if needed --------------------
-if evalin('base','exist(''A_HYPO_TRENDS'',''var'')~=1 || exist(''A_HYPO_TRENDS_pvals'',''var'')~=1')
-    [TRENDS, PVALS] = local_build_trends_from_temporal(A_HYPO_MEANS_TEMPORAL, 1990, 2023);
+%% -------------------- Initialize TRENDS/PVALS tables (from existing or fresh) --------------------
+if exist('A_HYPO_TRENDS','var')==1 && istable(A_HYPO_TRENDS)
+    TRENDS = A_HYPO_TRENDS; TRENDS.City = string(TRENDS.City);
 else
-    TRENDS = evalin('base','A_HYPO_TRENDS');       TRENDS.City = string(TRENDS.City);
-    PVALS  = evalin('base','A_HYPO_TRENDS_pvals'); PVALS.City  = string(PVALS.City);
+    TRENDS = table(unique(string(A_HYPO_MEANS_TEMPORAL.City)), 'VariableNames', {'City'});
+end
+if exist('A_HYPO_TRENDS_pvals','var')==1 && istable(A_HYPO_TRENDS_pvals)
+    PVALS = A_HYPO_TRENDS_pvals; PVALS.City = string(PVALS.City);
+else
+    PVALS = table(TRENDS.City, 'VariableNames', {'City'});
 end
 
-% Merge external trend CSVs (if provided)
-if ~isempty(C_TR),   TRENDS = jC(TRENDS, C_TR); end
-if ~isempty(C_TRP),  PVALS  = jC(PVALS,  C_TRP); end
-if ~isempty(N_TR),   TRENDS = jC(TRENDS, N_TR); end
-if ~isempty(N_TRP),  PVALS  = jC(PVALS,  N_TRP); end
+%% -------------------- Build trends from temporal, then merge into TRENDS/PVALS --------------------
+% Always build fresh trends from the temporal table (1990–2023)
+[TR_LOCAL, PV_LOCAL] = local_build_trends_from_temporal(A_HYPO_MEANS_TEMPORAL, 1990, 2023);
+
+% Ensure City is first column
+TR_LOCAL = movevars(TR_LOCAL, 'City', 'Before', 1);
+PV_LOCAL = movevars(PV_LOCAL, 'City', 'Before', 1);
+
+% Prefix freshly built trends (so we overwrite exact names deterministically)
+varsLocal = setdiff(string(TR_LOCAL.Properties.VariableNames), "City", 'stable');
+TR_LOCAL.Properties.VariableNames(2:end) = "TRENDS_" + varsLocal;
+PV_LOCAL.Properties.VariableNames(2:end)  = "TRENDS_p_" + varsLocal;
+
+% Overwrite: drop any existing columns in TRENDS/PVALS that would collide
+dropT = intersect(string(TR_LOCAL.Properties.VariableNames), string(TRENDS.Properties.VariableNames));
+dropT = setdiff(dropT, "City");
+if ~isempty(dropT), TRENDS(:, dropT) = []; end
+
+dropP = intersect(string(PV_LOCAL.Properties.VariableNames), string(PVALS.Properties.VariableNames));
+dropP = setdiff(dropP, "City");
+if ~isempty(dropP), PVALS(:, dropP) = []; end
+
+% Clean join (no duplicates, no TRENDS_TRENDS from this step)
+TRENDS = local_outerjoin_city(TRENDS, TR_LOCAL);
+PVALS  = local_outerjoin_city(PVALS,  PV_LOCAL);
+
+% Merge external trend CSVs if provided
+if ~isempty(C_TR),   TRENDS = local_outerjoin_city(TRENDS, C_TR);   end
+if ~isempty(C_TRP),  PVALS  = local_outerjoin_city(PVALS,  C_TRP);  end
+if ~isempty(N_TR),   TRENDS = local_outerjoin_city(TRENDS, N_TR);   end
+if ~isempty(N_TRP),  PVALS  = local_outerjoin_city(PVALS,  N_TRP);  end
 
 assignin('base','A_HYPO_TRENDS',       TRENDS);
 assignin('base','A_HYPO_TRENDS_pvals', PVALS);
 
-% ---- Drop disallowed columns from trends before prefix/append ----
+% Drop disallowed columns by pattern
 A_HYPO_TRENDS = local_drop_vars_by_pattern(A_HYPO_TRENDS, killPats, "City");
 assignin('base','A_HYPO_TRENDS',A_HYPO_TRENDS);
-
 
 %% -------------------- Add mixed-effects luxury-effect slopes (per $10k) --------------------
 % Uses tract-level data in CENSUS_TABLES_rebuilt; coverage=PCT_OVERLAP; income=RAW_INCOME_CPI.
@@ -102,9 +139,9 @@ A_HYPO_TRENDS.City = string(A_HYPO_TRENDS.City);
 A_HYPO_TRENDS = local_outerjoin_city(table(CityListMaster,'VariableNames',{'City'}), A_HYPO_TRENDS);
 
 % Vars needed by the persistent function used inside fit_metric_percity
-pctNames    = {'PCT_OVERLAP'};   %#ok<NASGU>  % harmonized spec
-incRawCands = {'RAW_INCOME_CPI'};    %#ok<NASGU>
-tblNames    = string(fieldnames(CENSUS_TABLES_rebuilt));  %#ok<NASGU>
+pctNames    = {'PCT_OVERLAP'};                 %#ok<NASGU>
+incRawCands = {'RAW_INCOME_CPI'};              %#ok<NASGU>
+tblNames    = string(fieldnames(CENSUS_TABLES_rebuilt)); %#ok<NASGU>
 numify      = @(x) str2double(regexprep(string(x),'[,\$%]','')); %#ok<NASGU>
 
 % Run LME for MEAN_NDVI and MEAN_LST
@@ -127,6 +164,158 @@ A_HYPO_TRENDS = movevars(A_HYPO_TRENDS, {'LME_LE_MEAN_NDVI_per10k','LME_LE_MEAN_
 assignin('base','A_HYPO_TRENDS',A_HYPO_TRENDS);
 fprintf('Mixed-effects slopes added to A_HYPO_TRENDS.\n');
 
+%% -------------------- LME interaction trends per year (per $10k per year) --------------------
+metrics_for_trend = struct( ...
+  'name', {'MEAN_NDVI','MEAN_LST'}, ...
+  'outv', {'LME_TREND_dLE_MEAN_NDVI_per10k_perYR','LME_TREND_dLE_MEAN_LST_per10k_perYR'} );
+
+for mm = 1:numel(metrics_for_trend)
+    metricName = metrics_for_trend(mm).name;
+    outVar     = metrics_for_trend(mm).outv;
+
+    % ---------- Build Tall ----------
+    CityCol = {}; YearCol = []; IncCol = []; YCol = [];
+    for ci = 1:numel(CityListMaster)
+        city = CityListMaster(ci);
+        for yr = yearsUse
+            tname = sprintf('T_%d_%s', yr, city);
+            if ~ismember(tname, tblNames), continue; end
+            T = CENSUS_TABLES_rebuilt.(tname);
+            if ~istable(T) || height(T)==0, continue; end
+
+            V = string(T.Properties.VariableNames);
+            vPct = V(strcmpi(V,'PCT_OVERLAP')); if isempty(vPct), continue; end
+            vY   = V(strcmpi(V, metricName));   if isempty(vY),   continue; end
+            vInc = V(strcmpi(V,'RAW_INCOME_CPI')); if isempty(vInc), continue; end
+
+            pct = numify(T.(vPct));
+            mxc = max(pct(isfinite(pct)));
+            if isfinite(mxc) && mxc <= 1.5, pct = 100*pct; end
+            pct(pct>100)=100;
+
+            x10 = numify(T.(vInc))./10000;
+            yy  = numify(T.(vY));
+
+            ok = isfinite(pct) & pct>=thresh & isfinite(x10) & isfinite(yy);
+            if nnz(ok) < minTracts, continue; end
+
+            n = nnz(ok);
+            CityCol(end+1:end+n,1) = repmat({char(city)}, n, 1); %#ok<AGROW>
+            YearCol(end+1:end+n,1) = repmat(yr, n, 1);           %#ok<AGROW>
+            IncCol(end+1:end+n,1)  = x10(ok);                    %#ok<AGROW>
+            YCol(end+1:end+n,1)    = yy(ok);                     %#ok<AGROW>
+        end
+    end
+
+    if isempty(YearCol)
+        if ~ismember(outVar, string(A_HYPO_TRENDS.Properties.VariableNames))
+            A_HYPO_TRENDS.(outVar) = NaN(height(A_HYPO_TRENDS),1);
+        else
+            A_HYPO_TRENDS.(outVar)(:) = NaN;
+        end
+        continue
+    end
+
+    Tall = table(categorical(CityCol), YearCol, IncCol, YCol, ...
+                 'VariableNames', {'City','year','inc10k','y'});
+    Tall.City = categorical(string(Tall.City), CityListMaster);
+    Tall = Tall(~ismissing(Tall.City), :);
+    if numel(unique(Tall.year)) < 2
+        if ~ismember(outVar, string(A_HYPO_TRENDS.Properties.VariableNames))
+            A_HYPO_TRENDS.(outVar) = NaN(height(A_HYPO_TRENDS),1);
+        else
+            A_HYPO_TRENDS.(outVar)(:) = NaN;
+        end
+        continue
+    end
+    Tall.yearC = Tall.year - mean(Tall.year,'omitnan');
+
+    % ---------- Fit LMM with interaction ----------
+    formRE = 'y ~ inc10k*yearC + (1 + inc10k + yearC + inc10k:yearC | City)';
+    try
+        mdl = fitlme(Tall, formRE, 'FitMethod','REML');
+    catch
+        mdl = fitlme(Tall, 'y ~ inc10k*yearC + (1 + inc10k + yearC | City)', 'FitMethod','REML');
+    end
+
+    % Fixed effect for inc10k:yearC
+    cn = string(mdl.CoefficientNames);
+    j  = find(cn=="inc10k:yearC" | cn=="yearC:inc10k" | (contains(cn,"inc10k") & contains(cn,"yearC") & contains(cn,":")), 1);
+    b_int = NaN;
+    if ~isempty(j), b_int = mdl.Coefficients.Estimate(j); end
+
+    % BLUPs for interaction (city-specific adjustments)
+    CityBLUP = containers.Map('KeyType','char','ValueType','double');
+    try
+        REt = randomEffects(mdl);
+        if istable(REt)
+            v = string(REt.Properties.VariableNames);
+            cName = find(ismember(lower(v), lower(["Name","Effect","EffName","REName"])),1);
+            cLev  = find(ismember(lower(v), lower(["Level","Group"])),1);
+            cEst  = find(ismember(lower(v), lower(["Estimate","RE","Value","Est"])),1);
+            if ~isempty(cName) && ~isempty(cLev) && ~isempty(cEst)
+                Name = string(REt.(v(cName)));
+                Lev  = string(REt.(v(cLev)));
+                Est  = double(REt.(v(cEst)));
+                want = contains(lower(Name), "inc10k") & contains(lower(Name), "year");
+                for r = find(want).'
+                    CityBLUP(lower(strtrim(Lev(r)))) = Est(r);
+                end
+            end
+        end
+    catch
+    end
+
+    % Two-stage fallback (per-city LE ~ yearC)
+    G   = findgroups(Tall.City, Tall.year);
+    LEy = splitapply(@(x,y) local_slope(x,y), Tall.inc10k, Tall.y, G);
+    C1  = splitapply(@(c) c(1), Tall.City, G);
+    Y1  = splitapply(@(y) y(1),  Tall.year, G);
+    Tcy = table(C1, Y1, LEy, 'VariableNames',{'City','year','LE'});
+    Tcy = Tcy(isfinite(Tcy.LE), :);
+    Tcy.yearC = Tcy.year - mean(Tcy.year);
+
+    % Compose per-city trend (b_int + BLUP) or 2-stage trend if BLUP missing
+    TrendCity = table(string(CityListMaster),'VariableNames',{'City'});
+    TrendCity.Trend_per10k_perYR = NaN(height(TrendCity),1);
+    for ci = 1:numel(CityListMaster)
+        c = string(CityListMaster(ci));
+        key = lower(strtrim(c));
+        if isfinite(b_int) && isKey(CityBLUP,key)
+            TrendCity.Trend_per10k_perYR(ci) = b_int + CityBLUP(key);
+        else
+            Ti = Tcy(string(Tcy.City)==c,:);
+            if height(Ti) >= 3 && std(double(Ti.yearC))>0
+                X  = [ones(height(Ti),1) double(Ti.yearC)];
+                yi = double(Ti.LE);
+                beta = X\yi;
+                TrendCity.Trend_per10k_perYR(ci) = beta(2);
+            end
+        end
+    end
+
+    % Join into A_HYPO_TRENDS with clear name
+    TrendCity.City = string(TrendCity.City);
+    if ismember(outVar, string(A_HYPO_TRENDS.Properties.VariableNames))
+        A_HYPO_TRENDS(:,outVar) = [];  % replace cleanly
+    end
+    A_HYPO_TRENDS = outerjoin(A_HYPO_TRENDS, TrendCity, 'Keys','City','MergeKeys',true,'Type','left');
+    A_HYPO_TRENDS.Properties.VariableNames(end) = {outVar};
+end
+
+assignin('base','A_HYPO_TRENDS',A_HYPO_TRENDS);
+fprintf('LMM-based TREND variables added to A_HYPO_TRENDS (MEAN_*).\n');
+
+% --- helper used above (keep near other locals) ---
+function b = local_slope(x, y)
+    ok = isfinite(x) & isfinite(y);
+    x = x(ok); y = y(ok);
+    if numel(x) < 3 || std(x)==0, b = NaN; return; end
+    X = [ones(numel(x),1) x];
+    beta = X\y;
+    b = beta(2);
+end
+
 %% -------------------- Drop all-NaN trends cols & prefix trends, then append MEAN_* --------------------
 [A_HYPO_TRENDS, killed] = local_drop_all_nan_cols(A_HYPO_TRENDS, "City");
 assignin('base','A_HYPO_TRENDS',A_HYPO_TRENDS);
@@ -139,10 +328,14 @@ end
 [A_HYPO_TRENDS] = local_prefix_trends_and_append_means(A_HYPO_TRENDS, A_HYPO_MEANS);
 assignin('base','A_HYPO_TRENDS', A_HYPO_TRENDS);
 
-% ---- Final pass: drop any remaining matches (e.g., MEAN_* or TRENDS_* carrying patterns) ----
-A_HYPO_TRENDS = local_drop_vars_by_pattern(A_HYPO_TRENDS, killPats, "City");
+% ----- OPTIONAL one-time cleanup: remove any double-prefixed columns -----
+badT = startsWith(string(A_HYPO_TRENDS.Properties.VariableNames), "TRENDS_TRENDS_");
+if any(badT), A_HYPO_TRENDS(:, badT) = []; end
 assignin('base','A_HYPO_TRENDS', A_HYPO_TRENDS);
 
+% ---- Final pass: drop any remaining matches (e.g., patterns) ----
+A_HYPO_TRENDS = local_drop_vars_by_pattern(A_HYPO_TRENDS, killPats, "City");
+assignin('base','A_HYPO_TRENDS', A_HYPO_TRENDS);
 
 %% -------------------- Build Z-scored versions with mean imputation --------------------
 A_HYPO_MEANS_Z   = local_zscore_table(A_HYPO_MEANS,   keyVars="City");
@@ -161,7 +354,6 @@ A_HYPO_MEANS_TEMPORAL  = local_drop_vars_by_pattern(A_HYPO_MEANS_TEMPORAL,  kill
 assignin('base','A_HYPO_MEANS',A_HYPO_MEANS);
 assignin('base','A_HYPO_MEDIANS',A_HYPO_MEDIANS);
 assignin('base','A_HYPO_MEANS_TEMPORAL',A_HYPO_MEANS_TEMPORAL);
-
 
 fprintf('Z-scored tables created: A_HYPO_MEANS_Z, A_HYPO_MEDIANS_Z, A_HYPO_TRENDS_Z.\n');
 
@@ -249,48 +441,63 @@ function [T, killed] = local_drop_all_nan_cols(T, keyName)
 end
 
 function T = local_prefix_trends_and_append_means(Ttr, Tmn)
-    % Prefix numeric, non-constant trend columns with TRENDS_, then append MEAN_* from A_HYPO_MEANS
+    % Prefix numeric, non-constant trend columns with TRENDS_ (without double-prefix),
+    % overwriting any existing colliding target names; then append MEAN_* from A_HYPO_MEANS.
     Ttr.City = string(Ttr.City);
     Tmn.City = string(Tmn.City);
 
-    isNumericLike = @(x) isnumeric(x) || islogical(x) || isduration(x) || isdatetime(x);
-    toNum = @(x) (isduration(x) .* seconds(x)) + (isdatetime(x) .* datenum(x)) + (~(isduration(x)||isdatetime(x)) .* double(x));
-    isConstant = @(col) (~isNumericLike(col)) || (all(~isfinite(toNum(col)))) || ((max(toNum(col),[],'omitnan') - min(toNum(col),[],'omitnan'))==0);
+    isNumericLike = @(x) (isnumeric(x) || islogical(x) || isduration(x) || isdatetime(x));
+    coerce = @(c) (isduration(c).*seconds(c)) + (isdatetime(c).*datenum(c)) + ...
+                  (~isduration(c) & ~isdatetime(c)).*double(c);
+    isConst = @(c) ~isNumericLike(c) || isempty(c(isfinite(coerce(c)))) || ...
+                   (max(coerce(c),[],'omitnan') - min(coerce(c),[],'omitnan') == 0);
 
+    % ---- 1) Prefix trend cols in Ttr (skip those already 'TRENDS_') ----
     vTr = string(Ttr.Properties.VariableNames);
     candTr = setdiff(vTr, "City", 'stable');
+
     keepRename = false(size(candTr));
     for i = 1:numel(candTr)
+        if startsWith(candTr(i), "TRENDS_"), continue; end
         col = Ttr.(candTr{i});
-        keepRename(i) = isNumericLike(col) && ~isConstant(col);
+        keepRename(i) = isNumericLike(col) && ~isConst(col);
     end
     renameList = candTr(keepRename);
     if ~isempty(renameList)
-        newNames = "TRENDS_" + renameList;
-        Ttr = renamevars(Ttr, renameList, newNames);
+        targetNames = "TRENDS_" + renameList;
+
+        % KEY: drop existing target columns to allow overwrite
+        existingTargets = intersect(targetNames, vTr);
+        existingTargets = setdiff(existingTargets, "City");
+        if ~isempty(existingTargets)
+            Ttr(:, existingTargets) = [];
+        end
+
+        Ttr = renamevars(Ttr, renameList, targetNames);
     end
 
+    % ---- 2) Append MEAN_* from A_HYPO_MEANS (skip already 'MEAN_') ----
     vMn = string(Tmn.Properties.VariableNames);
     candMn = setdiff(vMn, "City", 'stable');
     keepMn = false(size(candMn));
     for i = 1:numel(candMn)
-        col = Tmn.(candMn{i});
-        keepMn(i) = isNumericLike(col) && ~isConstant(col);
+        nm = candMn(i);
+        if startsWith(nm, "MEAN_"), continue; end
+        col = Tmn.(nm);
+        keepMn(i) = isNumericLike(col) && ~isConst(col);
     end
     useMn = candMn(keepMn);
+    if isempty(useMn), T = Ttr; return; end
 
-    if isempty(useMn)
-        T = Ttr; return;
-    end
     Tmn_sub = Tmn(:, ["City", useMn]);
-    Tmn_prefixed = Tmn_sub;
-    Tmn_prefixed.Properties.VariableNames(2:end) = cellstr("MEAN_" + useMn);
+    Tmn_sub.Properties.VariableNames(2:end) = cellstr("MEAN_" + useMn);
 
-    dup = intersect(string(Tmn_prefixed.Properties.VariableNames), string(Ttr.Properties.VariableNames));
+    % Overwrite any existing same-named MEAN_* in Ttr
+    dup = intersect(string(Tmn_sub.Properties.VariableNames), string(Ttr.Properties.VariableNames));
     dup = setdiff(dup, "City");
     if ~isempty(dup), Ttr(:, dup) = []; end
 
-    T = outerjoin(Ttr, Tmn_prefixed, 'Keys','City', 'MergeKeys',true, 'Type','left');
+    T = outerjoin(Ttr, Tmn_sub, 'Keys','City', 'MergeKeys',true, 'Type','left');
     T = movevars(T, 'City', 'Before', 1);
 end
 
@@ -482,12 +689,11 @@ function Tbl = local_harmonize_re_table(T)
     % --- Name column ---
     idxName = find(ismember(lower(v), lower(["Name","Effect","EffName","REName"])), 1);
     if isempty(idxName)
-        % first text-like column
         isTextCol = varfun(@(x) iscellstr(x) || isstring(x) || iscategorical(x), T, 'OutputFormat','uniform');
         idxName = find(isTextCol,1);
         if isempty(idxName), idxName = 1; end
     end
-    varName_Name = char(v(idxName));  % char for maximum compatibility
+    varName_Name = char(v(idxName));
     Name = string(T.(varName_Name));
 
     % --- Level column ---
@@ -547,7 +753,6 @@ function T = local_drop_vars_by_pattern(T, patterns, keyVars)
     end
     T(:, work(kill)) = [];
 end
-
 
 function TZ = local_zscore_table(T, varargin)
     % Mean-impute missing values, then z-score each numeric/logical/duration/datetime column.

@@ -98,6 +98,7 @@ end
 summaryRows = strings(0,1);
 nPooled = []; meanP = []; medP = [];
 nCity   = []; meanC = [];  medC = [];
+pMeanC  = []; pMedC = [];
 
 for m = 1:numel(metrics)
     rowsM = LuxPerCityYear_per10k(strcmp(LuxPerCityYear_per10k.Metric, metrics(m).name), :);
@@ -110,6 +111,7 @@ for m = 1:numel(metrics)
     meanP(end+1,1)       = mean(v(valid),'omitnan');   %#ok<AGROW>
     medP(end+1,1)        = median(v(valid),'omitnan'); %#ok<AGROW>
 
+    % --- city-averaged values & p-values ---
     if any(valid)
         cityU = unique(c(valid));
         vCity = nan(numel(cityU),1);
@@ -117,16 +119,63 @@ for m = 1:numel(metrics)
             mask = valid & c==cityU(i);
             vCity(i) = mean(v(mask),'omitnan');
         end
-        nCity(end+1,1) = numel(cityU);           %#ok<AGROW>
-        meanC(end+1,1) = mean(vCity,'omitnan');  %#ok<AGROW>
-        medC(end+1,1)  = median(vCity,'omitnan');%#ok<AGROW>
+
+        % keep only finite city means
+        okC = isfinite(vCity);
+        vCity = vCity(okC);
+
+        nCity(end+1,1) = numel(vCity);                %#ok<AGROW>
+        meanC(end+1,1) = mean(vCity,'omitnan');       %#ok<AGROW>
+        medC(end+1,1)  = median(vCity,'omitnan');     %#ok<AGROW>
+
+        % mean(cityAvg) ≠ 0 (two-sided t-test)
+        p_t = NaN;
+        if numel(vCity) >= 2
+            try
+                [~,p_t] = ttest(vCity, 0, 'Alpha', 0.05);
+            catch
+                % simple fallback: z-test using sample mean/SE
+                mu = mean(vCity); se = std(vCity)/sqrt(numel(vCity));
+                if isfinite(se) && se>0
+                    z = mu/se; p_t = 2*(1 - normcdf(abs(z),0,1));
+                end
+            end
+        end
+
+        % median(cityAvg) ≠ 0 (Wilcoxon signed-rank; fallback to sign test)
+        p_sr = NaN;
+        try
+            if exist('signrank','file')==2 && numel(vCity) >= 5
+                p_sr = signrank(vCity, 0, 'method','approx');  % two-sided
+            else
+                % Binomial sign test as a fallback
+                kpos = sum(vCity > 0);
+                kneg = sum(vCity < 0);
+                nNZ  = kpos + kneg;
+                if nNZ > 0
+                    % two-sided binomial about 0.5
+                    p_one = binocdf(min(kpos,kneg), nNZ, 0.5);
+                    p_sr  = 2 * p_one;
+                    p_sr  = min(1, p_sr);
+                end
+            end
+        catch
+            % leave NaN if tests fail
+        end
+
+        pMeanC(end+1,1) = p_t;  %#ok<AGROW>
+        pMedC(end+1,1)  = p_sr; %#ok<AGROW>
     else
-        nCity(end+1,1) = 0; meanC(end+1,1)=NaN; medC(end+1,1)=NaN; %#ok<AGROW>
+        nCity(end+1,1) = 0; meanC(end+1,1)=NaN; medC(end+1,1)=NaN;
+        pMeanC(end+1,1)=NaN; pMedC(end+1,1)=NaN; %#ok<AGROW>
     end
 end
 
-LuxSummary_per10k = table(summaryRows, nPooled, meanP, medP, nCity, meanC, medC, ...
-    'VariableNames', {'Metric','N_cityYears','Mean_pooled','Median_pooled','N_cities','Mean_cityAvg','Median_cityAvg'});
+LuxSummary_per10k = table( ...
+    summaryRows, nPooled, meanP, medP, nCity, meanC, medC, pMeanC, pMedC, ...
+    'VariableNames', {'Metric','N_cityYears','Mean_pooled','Median_pooled', ...
+                      'N_cities','Mean_cityAvg','Median_cityAvg', ...
+                      'pMean_cityAvg','pMedian_cityAvg'});
 
 disp('— Mean/Median luxury effect across cities & years (units: per $10,000) —');
 disp(LuxSummary_per10k);
@@ -135,6 +184,7 @@ if ~isempty(saveSummaryCSV)
     writetable(LuxSummary_per10k, saveSummaryCSV);
     fprintf('Saved summary to %s\n', saveSummaryCSV);
 end
+
 
 % ---------- % significant by year (per metric) ----------
 yearsAll = yearsUse(:);
